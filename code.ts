@@ -10,8 +10,8 @@ type UIMessage =
 
 type Matrix = [[number, number, number], [number, number, number]]
 
-const SVG_EXPORT_SETTINGS: ExportSettingsSVG = {
-  format: 'SVG',
+const SVG_EXPORT_SETTINGS: ExportSettingsSVGString = {
+  format: 'SVG_STRING',
 }
 
 figma.showUI(__html__, { width: 420, height: 480, themeColors: true })
@@ -102,6 +102,8 @@ async function resolveFrames(frameIds: string[]) {
 }
 
 async function renderFrameDocument(frame: FrameNode) {
+  await loadFonts(frame)
+
   const children = await Promise.all(
     frame.children
       .filter((child) => child.visible)
@@ -144,9 +146,14 @@ async function renderFrameDocument(frame: FrameNode) {
       overflow-wrap: break-word;
     }
     .figma-vector {
+      overflow: visible;
+      line-height: 0;
+      color: inherit;
+    }
+    .figma-vector > svg {
       display: block;
-      object-fit: fill;
-      pointer-events: none;
+      width: 100%;
+      height: 100%;
     }
   </style>
 </head>
@@ -195,8 +202,9 @@ async function renderTextNode(node: TextNode, parentMatrix: Matrix) {
     textStyle(node),
     await paintStyles(node.fills, 'color'),
   ].join(' ')
+  const text = await renderTextContent(node)
 
-  return `<div class="figma-node figma-text" data-name="${escapeAttribute(node.name)}" style="${style}">${escapeHtml(applyTextCase(node.characters, node.textCase))}</div>`
+  return `<div class="figma-node figma-text" data-name="${escapeAttribute(node.name)}" style="${style}">${text}</div>`
 }
 
 async function safeRenderSceneNode(node: SceneNode, parentMatrix: Matrix) {
@@ -208,11 +216,11 @@ async function safeRenderSceneNode(node: SceneNode, parentMatrix: Matrix) {
 }
 
 async function renderSvgNode(node: SceneNode, parentMatrix: Matrix) {
-  const svgBytes = await node.exportAsync(SVG_EXPORT_SETTINGS).catch((error: unknown) => {
+  const svg = await node.exportAsync(SVG_EXPORT_SETTINGS).catch((error: unknown) => {
     throw new Error(`Could not export "${node.name}" as SVG: ${errorMessage(error)}`)
   })
 
-  return `<img class="figma-node figma-vector" data-name="${escapeAttribute(node.name)}" src="${bytesToDataUrl(svgBytes, 'image/svg+xml')}" alt="${escapeAttribute(node.name)}" style="${baseStyle(node, parentMatrix)} ${effectsStyle(node)}">`
+  return `<div class="figma-node figma-vector" data-name="${escapeAttribute(node.name)}" style="${baseStyle(node, parentMatrix)} ${blendStyle(node)} ${effectsStyle(node)}">${normalizeSvg(svg)}</div>`
 }
 
 async function visualStyle(node: SceneNode, parentMatrix: Matrix) {
@@ -433,6 +441,82 @@ function textStyle(node: TextNode) {
     `display: flex;`,
     `align-items: ${verticalAlign(node.textAlignVertical)};`,
   ].join(' ')
+}
+
+async function renderTextContent(node: TextNode) {
+  const segments = node.getStyledTextSegments([
+    'fontName',
+    'fontSize',
+    'fontWeight',
+    'fills',
+    'letterSpacing',
+    'lineHeight',
+    'textCase',
+    'textDecoration',
+  ])
+
+  if (segments.length <= 1) {
+    return escapeHtml(applyTextCase(node.characters, node.textCase))
+  }
+
+  const renderedSegments = await Promise.all(
+    segments.map(async (segment) => {
+      const style = [
+        segmentTextStyle(segment),
+        await paintStyles(segment.fills, 'color'),
+      ].join(' ')
+
+      return `<span style="${style}">${escapeHtml(applyTextCase(segment.characters, segment.textCase))}</span>`
+    }),
+  )
+
+  return renderedSegments.join('')
+}
+
+function segmentTextStyle(
+  segment: Pick<
+    StyledTextSegment,
+    'fontName' | 'fontSize' | 'fontWeight' | 'letterSpacing' | 'lineHeight' | 'textDecoration'
+  >,
+) {
+  const fontName = segment.fontName
+  const fontFamily = typeof fontName === 'symbol' ? 'Inter' : fontName.family
+  const fontStyle = typeof fontName === 'symbol' ? 'Regular' : fontName.style
+  const fontSize = typeof segment.fontSize === 'symbol' ? 16 : segment.fontSize
+  const lineHeight = typeof segment.lineHeight === 'symbol' ? 'normal' : lineHeightValue(segment.lineHeight, fontSize)
+  const letterSpacing =
+    typeof segment.letterSpacing === 'symbol' ? 'normal' : letterSpacingValue(segment.letterSpacing, fontSize)
+  const fontWeightValue =
+    typeof segment.fontWeight === 'symbol' ? fontWeight(fontStyle) : segment.fontWeight
+  const decoration = typeof segment.textDecoration === 'symbol' ? 'none' : textDecoration(segment.textDecoration)
+
+  return [
+    `font-family: ${cssString(fontFamily)}, Arial, sans-serif;`,
+    `font-size: ${formatNumber(fontSize)}px;`,
+    `font-weight: ${fontWeightValue};`,
+    `font-style: ${fontStyle.toLowerCase().includes('italic') ? 'italic' : 'normal'};`,
+    `line-height: ${lineHeight};`,
+    `letter-spacing: ${letterSpacing};`,
+    `text-decoration: ${decoration};`,
+  ].join(' ')
+}
+
+async function loadFonts(node: SceneNode) {
+  if (node.type === 'TEXT') {
+    const fontNames = node.getRangeAllFontNames(0, node.characters.length)
+    await Promise.all(fontNames.map((fontName) => figma.loadFontAsync(fontName)))
+    return
+  }
+
+  if (isContainerNode(node)) {
+    await Promise.all(node.children.map((child) => loadFonts(child)))
+  }
+}
+
+function normalizeSvg(svg: string) {
+  return svg
+    .replace(/<script[\s\S]*?<\/script>/gi, '')
+    .replace(/<svg\b(?![^>]*\bpreserveAspectRatio=)/i, '<svg preserveAspectRatio="none"')
 }
 
 function isFrameNode(node: BaseNode): node is FrameNode {
