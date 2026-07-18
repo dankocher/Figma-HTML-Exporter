@@ -198,10 +198,7 @@ async function renderSceneNode(node: SceneNode, parentMatrix: Matrix): Promise<s
 
 async function renderTextNode(node: TextNode, parentMatrix: Matrix) {
   const style = textContainerStyle(node, parentMatrix)
-  const contentStyle = [
-    textStyle(node),
-    await paintStyles(node.fills, 'color', node),
-  ].join(' ')
+  const contentStyle = textBlockStyle(node)
   const text = await renderTextContent(node)
 
   return `<div class="figma-node figma-text" data-name="${escapeAttribute(node.name)}" style="${style}"><div style="${contentStyle}">${text}</div></div>`
@@ -268,7 +265,7 @@ async function nodePaintStyle(node: SceneNode) {
 }
 
 async function paintStyles(
-  paints: ReadonlyArray<Paint> | PluginAPI['mixed'],
+  paints: ReadonlyArray<Paint> | symbol,
   property: 'background' | 'color' = 'background',
   consumer?: SceneNode,
 ) {
@@ -465,32 +462,17 @@ function isShadowEffect(effect: Effect): effect is DropShadowEffect | InnerShado
   return effect.visible !== false && (effect.type === 'DROP_SHADOW' || effect.type === 'INNER_SHADOW')
 }
 
-function textStyle(node: TextNode) {
-  const fontName = node.fontName
-  const fontFamily = typeof fontName === 'symbol' ? 'Inter' : fontName.family
-  const fontStyle = typeof fontName === 'symbol' ? 'Regular' : fontName.style
-  const fontSize = typeof node.fontSize === 'symbol' ? 16 : node.fontSize
-  const fontWeightValue = typeof node.fontWeight === 'symbol' ? fontWeight(fontStyle) : node.fontWeight
-  const lineHeight = typeof node.lineHeight === 'symbol' ? 'normal' : lineHeightValue(node.lineHeight, fontSize)
-  const letterSpacing = typeof node.letterSpacing === 'symbol' ? 'normal' : letterSpacingValue(node.letterSpacing, fontSize)
-  const decoration = typeof node.textDecoration === 'symbol' ? 'none' : textDecoration(node.textDecoration)
-
+function textBlockStyle(node: TextNode) {
   return [
-    `font-family: ${cssString(fontFamily)}, Arial, sans-serif;`,
-    `font-size: ${formatNumber(fontSize)}px;`,
-    `font-weight: ${fontWeightValue};`,
-    `font-style: ${fontStyle.toLowerCase().includes('italic') ? 'italic' : 'normal'};`,
-    `line-height: ${lineHeight};`,
-    `letter-spacing: ${letterSpacing};`,
     `text-align: ${node.textAlignHorizontal.toLowerCase()};`,
-    `text-decoration: ${decoration};`,
     `margin: 0;`,
     `padding: 0;`,
+    `width: 100%;`,
   ].join(' ')
 }
 
 async function renderTextContent(node: TextNode) {
-  const segments = node.getStyledTextSegments([
+  const boundaries = node.getStyledTextSegments([
     'fontName',
     'fontSize',
     'fontWeight',
@@ -501,40 +483,62 @@ async function renderTextContent(node: TextNode) {
     'textDecoration',
   ])
 
-  if (segments.length === 0) {
+  if (boundaries.length === 0) {
     return escapeHtml(applyTextCase(node.characters, node.textCase))
   }
 
   const renderedSegments = await Promise.all(
-    segments.map(async (segment) => {
+    boundaries.map(async (segment) => {
+      const range = readTextRangeStyle(node, segment.start, segment.end)
       const style = [
-        segmentTextStyle(segment),
-        await paintStyles(segment.fills, 'color', node),
+        rangeTextStyle(range),
+        await paintStyles(range.fills, 'color', node),
       ].join(' ')
 
-      return `<span style="${style}">${escapeHtml(applyTextCase(segment.characters, segment.textCase))}</span>`
+      return `<span data-figma-font-size="${formatNumber(range.fontSize)}" data-figma-color="${escapeAttribute(await paintDebugColor(range.fills, node))}" style="${style}">${escapeHtml(applyTextCase(segment.characters, range.textCase))}</span>`
     }),
   )
 
   return renderedSegments.join('')
 }
 
-function segmentTextStyle(
-  segment: Pick<
-    StyledTextSegment,
-    'fontName' | 'fontSize' | 'fontWeight' | 'letterSpacing' | 'lineHeight' | 'textDecoration'
-  >,
-) {
-  const fontName = segment.fontName
+function readTextRangeStyle(node: TextNode, start: number, end: number) {
+  const fontName = node.getRangeFontName(start, end)
+  const fontSize = node.getRangeFontSize(start, end)
+  const fontWeightValue = node.getRangeFontWeight(start, end)
+  const fills = node.getRangeFills(start, end)
+  const letterSpacing = node.getRangeLetterSpacing(start, end)
+  const lineHeight = node.getRangeLineHeight(start, end)
+  const textCase = node.getRangeTextCase(start, end)
+  const textDecorationValue = node.getRangeTextDecoration(start, end)
+
+  return {
+    fontName,
+    fontSize: typeof fontSize === 'symbol' ? 16 : fontSize,
+    fontWeight: fontWeightValue,
+    fills: normalizeMixed(fills),
+    letterSpacing,
+    lineHeight,
+    textCase: normalizeMixed(textCase),
+    textDecoration: textDecorationValue,
+  }
+}
+
+function normalizeMixed<T>(value: T | symbol): T | symbol {
+  return typeof value === 'symbol' ? figma.mixed : value
+}
+
+function rangeTextStyle(range: ReturnType<typeof readTextRangeStyle>) {
+  const fontName = range.fontName
   const fontFamily = typeof fontName === 'symbol' ? 'Inter' : fontName.family
   const fontStyle = typeof fontName === 'symbol' ? 'Regular' : fontName.style
-  const fontSize = typeof segment.fontSize === 'symbol' ? 16 : segment.fontSize
-  const lineHeight = typeof segment.lineHeight === 'symbol' ? 'normal' : lineHeightValue(segment.lineHeight, fontSize)
+  const fontSize = range.fontSize
+  const lineHeight = typeof range.lineHeight === 'symbol' ? 'normal' : lineHeightValue(range.lineHeight, fontSize)
   const letterSpacing =
-    typeof segment.letterSpacing === 'symbol' ? 'normal' : letterSpacingValue(segment.letterSpacing, fontSize)
+    typeof range.letterSpacing === 'symbol' ? 'normal' : letterSpacingValue(range.letterSpacing, fontSize)
   const fontWeightValue =
-    typeof segment.fontWeight === 'symbol' ? fontWeight(fontStyle) : segment.fontWeight
-  const decoration = typeof segment.textDecoration === 'symbol' ? 'none' : textDecoration(segment.textDecoration)
+    typeof range.fontWeight === 'symbol' ? fontWeight(fontStyle) : range.fontWeight
+  const decoration = typeof range.textDecoration === 'symbol' ? 'none' : textDecoration(range.textDecoration)
 
   return [
     `font-family: ${cssString(fontFamily)}, Arial, sans-serif;`,
@@ -545,6 +549,19 @@ function segmentTextStyle(
     `letter-spacing: ${letterSpacing};`,
     `text-decoration: ${decoration};`,
   ].join(' ')
+}
+
+async function paintDebugColor(paints: ReadonlyArray<Paint> | symbol, consumer: SceneNode) {
+  if (typeof paints === 'symbol') {
+    return 'mixed'
+  }
+
+  const paint = paints.find((item) => item.visible !== false)
+  if (!paint || paint.type !== 'SOLID') {
+    return paint?.type ?? 'none'
+  }
+
+  return rgba(await resolvePaintColor(paint, consumer), paint.opacity ?? 1)
 }
 
 async function loadFonts(node: SceneNode) {
@@ -727,7 +744,7 @@ function textDecoration(value: TextDecoration) {
   return 'none'
 }
 
-function applyTextCase(value: string, textCase: TextCase | PluginAPI['mixed']) {
+function applyTextCase(value: string, textCase: TextCase | symbol) {
   if (typeof textCase === 'symbol' || textCase === 'ORIGINAL') {
     return value
   }
