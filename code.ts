@@ -11,6 +11,18 @@ type UIMessage =
 
 type Matrix = [[number, number, number], [number, number, number]]
 
+type ImageAsset = {
+  cssVariable: string
+  dataUrl: string
+  hash: string
+  mimeType: string
+}
+
+type RenderContext = {
+  fontFallback: string
+  imageAssets: Map<string, ImageAsset>
+}
+
 const SVG_EXPORT_SETTINGS: ExportSettingsSVGString = {
   format: 'SVG_STRING',
   svgIdAttribute: true,
@@ -142,13 +154,14 @@ async function resolveFrames(frameIds: string[]) {
 
 async function renderFrameDocument(frame: FrameNode, fontFallback: string) {
   await loadFonts(frame)
+  const context = createRenderContext(fontFallback)
 
   const children = await Promise.all(
     frame.children
       .filter((child) => child.visible)
-      .map((child) => safeRenderSceneNode(child, frame.absoluteTransform, fontFallback)),
+      .map((child) => safeRenderSceneNode(child, frame.absoluteTransform, context)),
   )
-  const frameBackground = await paintStyles(frame.fills, 'background', frame)
+  const frameBackground = await paintStyles(frame.fills, 'background', frame, context)
 
   return `<!doctype html>
 <html lang="en">
@@ -158,6 +171,7 @@ async function renderFrameDocument(frame: FrameNode, fontFallback: string) {
   <title>${escapeHtml(frame.name)}</title>
   <style>
     * { box-sizing: border-box; }
+${imageAssetStyleBlock(context)}
     html, body { margin: 0; min-height: 100%; }
     body {
       min-height: 100vh;
@@ -205,13 +219,20 @@ ${indent(children.join('\n'), 4)}
 `
 }
 
-async function renderSceneNode(node: SceneNode, parentMatrix: Matrix, fontFallback: string): Promise<string> {
+function createRenderContext(fontFallback: string): RenderContext {
+  return {
+    fontFallback,
+    imageAssets: new Map(),
+  }
+}
+
+async function renderSceneNode(node: SceneNode, parentMatrix: Matrix, context: RenderContext): Promise<string> {
   if (!isMeasurable(node)) {
     return ''
   }
 
   if (node.type === 'TEXT') {
-    return renderTextNode(node, parentMatrix, fontFallback)
+    return renderTextNode(node, parentMatrix, context)
   }
 
   if (isVectorLike(node)) {
@@ -222,30 +243,30 @@ async function renderSceneNode(node: SceneNode, parentMatrix: Matrix, fontFallba
     const children = await Promise.all(
       node.children
         .filter((child) => child.visible)
-        .map((child) => safeRenderSceneNode(child, node.absoluteTransform, fontFallback)),
+        .map((child) => safeRenderSceneNode(child, node.absoluteTransform, context)),
     )
 
-    return `<div class="figma-node" data-name="${escapeAttribute(node.name)}" style="${await visualStyle(node, parentMatrix)}">${children.join('\n')}</div>`
+    return `<div class="figma-node" data-name="${escapeAttribute(node.name)}" style="${await visualStyle(node, parentMatrix, context)}">${children.join('\n')}</div>`
   }
 
   if (node.type === 'RECTANGLE' || node.type === 'ELLIPSE') {
-    return `<div class="figma-node" data-name="${escapeAttribute(node.name)}" style="${await visualStyle(node, parentMatrix)}"></div>`
+    return `<div class="figma-node" data-name="${escapeAttribute(node.name)}" style="${await visualStyle(node, parentMatrix, context)}"></div>`
   }
 
   return renderSvgNode(node, parentMatrix)
 }
 
-async function renderTextNode(node: TextNode, parentMatrix: Matrix, fontFallback: string) {
+async function renderTextNode(node: TextNode, parentMatrix: Matrix, context: RenderContext) {
   const style = textContainerStyle(node, parentMatrix)
-  const contentStyle = await textBlockStyle(node, fontFallback)
-  const text = await renderTextContent(node, contentStyle, fontFallback)
+  const contentStyle = await textBlockStyle(node, context.fontFallback)
+  const text = await renderTextContent(node, contentStyle, context)
 
   return `<div class="figma-node figma-text" data-name="${escapeAttribute(node.name)}" style="${style}"><div style="${contentStyle}">${text}</div></div>`
 }
 
-async function safeRenderSceneNode(node: SceneNode, parentMatrix: Matrix, fontFallback: string) {
+async function safeRenderSceneNode(node: SceneNode, parentMatrix: Matrix, context: RenderContext) {
   try {
-    return await renderSceneNode(node, parentMatrix, fontFallback)
+    return await renderSceneNode(node, parentMatrix, context)
   } catch (error) {
     return `<!-- Skipped ${escapeHtml(node.type)} "${escapeHtml(node.name)}": ${escapeHtml(errorMessage(error))} -->`
   }
@@ -259,10 +280,10 @@ async function renderSvgNode(node: SceneNode, parentMatrix: Matrix) {
   return `<div class="figma-node figma-vector" data-name="${escapeAttribute(node.name)}" style="${baseStyle(node, parentMatrix)} ${blendStyle(node)} ${effectsStyle(node)}">${normalizeSvg(svg, node.id)}</div>`
 }
 
-async function visualStyle(node: SceneNode, parentMatrix: Matrix) {
+async function visualStyle(node: SceneNode, parentMatrix: Matrix, context: RenderContext) {
   return [
     baseStyle(node, parentMatrix),
-    await nodePaintStyle(node),
+    await nodePaintStyle(node, context),
     await strokeStyle(node),
     cornerRadius(node),
     blendStyle(node),
@@ -295,9 +316,9 @@ function textContainerStyle(node: TextNode, parentMatrix: Matrix) {
   ].join(' ')
 }
 
-async function nodePaintStyle(node: SceneNode) {
+async function nodePaintStyle(node: SceneNode, context: RenderContext) {
   if ('fills' in node) {
-    return paintStyles(node.fills, 'background', node)
+    return paintStyles(node.fills, 'background', node, context)
   }
 
   return 'background: transparent;'
@@ -307,6 +328,7 @@ async function paintStyles(
   paints: ReadonlyArray<Paint> | symbol,
   property: 'background' | 'color' = 'background',
   consumer?: SceneNode,
+  context?: RenderContext,
 ) {
   if (typeof paints === 'symbol') {
     return property === 'color' ? 'color: #111827;' : 'background: transparent;'
@@ -317,7 +339,7 @@ async function paintStyles(
     return property === 'color' ? 'color: #111827;' : 'background: transparent;'
   }
 
-  const layers = await Promise.all(visiblePaints.map((paint) => paintToCss(paint, property, consumer)))
+  const layers = await Promise.all(visiblePaints.map((paint) => paintToCss(paint, property, consumer, context)))
   const values = layers.filter(Boolean)
 
   if (values.length === 0) {
@@ -331,7 +353,12 @@ async function paintStyles(
   return `background: ${values.reverse().join(', ')}; ${backgroundSizing(visiblePaints)}`
 }
 
-async function paintToCss(paint: Paint, property: 'background' | 'color', consumer?: SceneNode) {
+async function paintToCss(
+  paint: Paint,
+  property: 'background' | 'color',
+  consumer?: SceneNode,
+  context?: RenderContext,
+) {
   if (paint.type === 'SOLID') {
     const color = await resolvePaintColor(paint, consumer)
     return rgba(color, paint.opacity ?? 1)
@@ -342,17 +369,8 @@ async function paintToCss(paint: Paint, property: 'background' | 'color', consum
   }
 
   if (paint.type === 'IMAGE' && paint.imageHash) {
-    const image = figma.getImageByHash(paint.imageHash)
-    if (!image) {
-      return ''
-    }
-
-    const bytes = await image.getBytesAsync().catch(() => null)
-    if (!bytes) {
-      return ''
-    }
-
-    return `url("${bytesToDataUrl(bytes, imageMimeType(bytes))}")`
+    const cssVariable = context ? await registerImageAsset(context, paint.imageHash) : ''
+    return cssVariable ? `var(${cssVariable})` : ''
   }
 
   if (paint.type === 'GRADIENT_LINEAR') {
@@ -364,6 +382,60 @@ async function paintToCss(paint: Paint, property: 'background' | 'color', consum
   }
 
   return ''
+}
+
+async function registerImageAsset(context: RenderContext, imageHash: string) {
+  const existing = context.imageAssets.get(imageHash)
+  if (existing) {
+    return existing.cssVariable
+  }
+
+  const image = figma.getImageByHash(imageHash)
+  if (!image) {
+    return ''
+  }
+
+  const bytes = await image.getBytesAsync().catch(() => null)
+  if (!bytes) {
+    return ''
+  }
+
+  const mimeType = imageMimeType(bytes)
+  const asset: ImageAsset = {
+    cssVariable: imageCssVariableName(imageHash, context),
+    dataUrl: bytesToDataUrl(bytes, mimeType),
+    hash: imageHash,
+    mimeType,
+  }
+
+  context.imageAssets.set(imageHash, asset)
+  return asset.cssVariable
+}
+
+function imageAssetStyleBlock(context: RenderContext) {
+  if (context.imageAssets.size === 0) {
+    return ''
+  }
+
+  const declarations = Array.from(context.imageAssets.values()).map(
+    (asset) => `${asset.cssVariable}: url("${asset.dataUrl}"); /* ${asset.hash} ${asset.mimeType} */`,
+  )
+
+  return `    :root {\n${indent(declarations.join('\n'), 6)}\n    }\n`
+}
+
+function imageCssVariableName(imageHash: string, context: RenderContext) {
+  const base = `--figma-image-${sanitizeDomId(imageHash) || 'asset'}`
+  const usedNames = new Set(Array.from(context.imageAssets.values()).map((asset) => asset.cssVariable))
+  let name = base
+  let index = 2
+
+  while (usedNames.has(name)) {
+    name = `${base}-${index}`
+    index += 1
+  }
+
+  return name
 }
 
 function backgroundSizing(paints: ReadonlyArray<Paint>) {
@@ -592,7 +664,7 @@ async function textBlockStyle(node: TextNode, fontFallback: string) {
   ].join(' ')
 }
 
-async function renderTextContent(node: TextNode, contentStyle: string, fontFallback: string) {
+async function renderTextContent(node: TextNode, contentStyle: string, context: RenderContext) {
   const boundaries = node.getStyledTextSegments([
     'fontName',
     'fontSize',
@@ -618,8 +690,8 @@ async function renderTextContent(node: TextNode, contentStyle: string, fontFallb
     boundaries.map(async (segment) => {
       const range = readTextRangeStyle(node, segment.start, segment.end)
       const style = [
-        rangeTextStyle(range, fontFallback),
-        await paintStyles(range.fills, 'color', node),
+        rangeTextStyle(range, context.fontFallback),
+        await paintStyles(range.fills, 'color', node, context),
       ].join(' ')
 
       return `<span data-figma-font-size="${formatNumber(range.fontSize)}" data-figma-color="${escapeAttribute(await paintDebugColor(range.fills, node))}" style="${style}">${escapeHtml(applyTextCase(segment.characters, range.textCase))}</span>`
