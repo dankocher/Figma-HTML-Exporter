@@ -197,14 +197,14 @@ async function renderSceneNode(node: SceneNode, parentMatrix: Matrix): Promise<s
 }
 
 async function renderTextNode(node: TextNode, parentMatrix: Matrix) {
-  const style = [
-    await visualStyle(node, parentMatrix),
+  const style = textContainerStyle(node, parentMatrix)
+  const contentStyle = [
     textStyle(node),
     await paintStyles(node.fills, 'color'),
   ].join(' ')
   const text = await renderTextContent(node)
 
-  return `<div class="figma-node figma-text" data-name="${escapeAttribute(node.name)}" style="${style}">${text}</div>`
+  return `<div class="figma-node figma-text" data-name="${escapeAttribute(node.name)}" style="${style}"><div style="${contentStyle}">${text}</div></div>`
 }
 
 async function safeRenderSceneNode(node: SceneNode, parentMatrix: Matrix) {
@@ -220,7 +220,7 @@ async function renderSvgNode(node: SceneNode, parentMatrix: Matrix) {
     throw new Error(`Could not export "${node.name}" as SVG: ${errorMessage(error)}`)
   })
 
-  return `<div class="figma-node figma-vector" data-name="${escapeAttribute(node.name)}" style="${baseStyle(node, parentMatrix)} ${blendStyle(node)} ${effectsStyle(node)}">${normalizeSvg(svg)}</div>`
+  return `<div class="figma-node figma-vector" data-name="${escapeAttribute(node.name)}" style="${baseStyle(node, parentMatrix)} ${blendStyle(node)} ${effectsStyle(node)}">${normalizeSvg(svg, node.id)}</div>`
 }
 
 async function visualStyle(node: SceneNode, parentMatrix: Matrix) {
@@ -243,6 +243,19 @@ function baseStyle(node: SceneNode, parentMatrix: Matrix) {
     `height: ${formatNumber(node.height)}px;`,
     `transform: matrix(${formatNumber(matrix[0][0])}, ${formatNumber(matrix[1][0])}, ${formatNumber(matrix[0][1])}, ${formatNumber(matrix[1][1])}, ${formatNumber(matrix[0][2])}, ${formatNumber(matrix[1][2])});`,
     `opacity: ${formatNumber(nodeOpacity(node))};`,
+  ].join(' ')
+}
+
+function textContainerStyle(node: TextNode, parentMatrix: Matrix) {
+  return [
+    baseStyle(node, parentMatrix),
+    blendStyle(node),
+    effectsStyle(node),
+    clipStyle(node),
+    `display: flex;`,
+    `flex-direction: column;`,
+    `justify-content: ${verticalAlign(node.textAlignVertical)};`,
+    `background: transparent;`,
   ].join(' ')
 }
 
@@ -425,6 +438,7 @@ function textStyle(node: TextNode) {
   const fontFamily = typeof fontName === 'symbol' ? 'Inter' : fontName.family
   const fontStyle = typeof fontName === 'symbol' ? 'Regular' : fontName.style
   const fontSize = typeof node.fontSize === 'symbol' ? 16 : node.fontSize
+  const fontWeightValue = typeof node.fontWeight === 'symbol' ? fontWeight(fontStyle) : node.fontWeight
   const lineHeight = typeof node.lineHeight === 'symbol' ? 'normal' : lineHeightValue(node.lineHeight, fontSize)
   const letterSpacing = typeof node.letterSpacing === 'symbol' ? 'normal' : letterSpacingValue(node.letterSpacing, fontSize)
   const decoration = typeof node.textDecoration === 'symbol' ? 'none' : textDecoration(node.textDecoration)
@@ -432,14 +446,14 @@ function textStyle(node: TextNode) {
   return [
     `font-family: ${cssString(fontFamily)}, Arial, sans-serif;`,
     `font-size: ${formatNumber(fontSize)}px;`,
-    `font-weight: ${fontWeight(fontStyle)};`,
+    `font-weight: ${fontWeightValue};`,
     `font-style: ${fontStyle.toLowerCase().includes('italic') ? 'italic' : 'normal'};`,
     `line-height: ${lineHeight};`,
     `letter-spacing: ${letterSpacing};`,
     `text-align: ${node.textAlignHorizontal.toLowerCase()};`,
     `text-decoration: ${decoration};`,
-    `display: flex;`,
-    `align-items: ${verticalAlign(node.textAlignVertical)};`,
+    `margin: 0;`,
+    `padding: 0;`,
   ].join(' ')
 }
 
@@ -513,10 +527,37 @@ async function loadFonts(node: SceneNode) {
   }
 }
 
-function normalizeSvg(svg: string) {
-  return svg
+function normalizeSvg(svg: string, nodeId: string) {
+  const prefix = `svg-${sanitizeDomId(nodeId)}-`
+
+  return prefixSvgIds(svg, prefix)
     .replace(/<script[\s\S]*?<\/script>/gi, '')
-    .replace(/<svg\b(?![^>]*\bpreserveAspectRatio=)/i, '<svg preserveAspectRatio="none"')
+    .replace(/\s(width|height)="[^"]*"/gi, '')
+    .replace(/<svg\b(?![^>]*\bpreserveAspectRatio=)/i, '<svg preserveAspectRatio="xMidYMid meet"')
+}
+
+function prefixSvgIds(svg: string, prefix: string) {
+  const ids = Array.from(svg.matchAll(/\bid="([^"]+)"/g), (match) => match[1])
+  let output = svg
+
+  for (const id of ids) {
+    const nextId = `${prefix}${id}`
+    output = output
+      .replace(new RegExp(`\\bid="${escapeRegExp(id)}"`, 'g'), `id="${nextId}"`)
+      .replace(new RegExp(`url\\(#${escapeRegExp(id)}\\)`, 'g'), `url(#${nextId})`)
+      .replace(new RegExp(`href="#${escapeRegExp(id)}"`, 'g'), `href="#${nextId}"`)
+      .replace(new RegExp(`xlink:href="#${escapeRegExp(id)}"`, 'g'), `xlink:href="#${nextId}"`)
+  }
+
+  return output
+}
+
+function sanitizeDomId(value: string) {
+  return value.replace(/[^a-zA-Z0-9_-]/g, '-')
+}
+
+function escapeRegExp(value: string) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
 }
 
 function isFrameNode(node: BaseNode): node is FrameNode {
