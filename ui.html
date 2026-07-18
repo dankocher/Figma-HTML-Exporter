@@ -39,6 +39,10 @@
     box-sizing: border-box;
   }
 
+  [hidden] {
+    display: none !important;
+  }
+
   body {
     margin: 0;
     background: var(--figma-color-bg, #ffffff);
@@ -99,8 +103,7 @@
 
   .empty {
     display: flex;
-    flex: 1;
-    min-height: 300px;
+    min-height: 150px;
     flex-direction: column;
     align-items: center;
     justify-content: center;
@@ -333,7 +336,12 @@
       }
     }
 
-    downloadBlob(createZip(files), 'figma-html-export.zip', 'application/zip')
+    if (files.length === 1) {
+      downloadBlob(new Blob([files[0].html], { type: 'text/html;charset=utf-8' }), files[0].name)
+      return
+    }
+
+    downloadBlob(createZip(files), 'figma-html-export.zip')
   }
 
   function createZip(files) {
@@ -415,8 +423,8 @@
     return value >>> 0
   })
 
-  function downloadBlob(blob, name, type) {
-    const url = URL.createObjectURL(blob.type ? blob : new Blob([blob], { type }))
+  function downloadBlob(blob, name) {
+    const url = URL.createObjectURL(blob)
     const link = document.createElement('a')
     link.href = url
     link.download = name
