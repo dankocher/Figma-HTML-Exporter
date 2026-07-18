@@ -8,9 +8,10 @@ type UIMessage =
   | { type: 'export-frames'; frameIds: string[] }
   | { type: 'cancel' }
 
-const FRAME_EXPORT_SETTINGS: ExportSettingsImage = {
-  format: 'PNG',
-  constraint: { type: 'SCALE', value: 1 },
+type Matrix = [[number, number, number], [number, number, number]]
+
+const SVG_EXPORT_SETTINGS: ExportSettingsSVG = {
+  format: 'SVG',
 }
 
 figma.showUI(__html__, { width: 420, height: 480, themeColors: true })
@@ -101,10 +102,12 @@ async function resolveFrames(frameIds: string[]) {
 }
 
 async function renderFrameDocument(frame: FrameNode) {
-  const imageBytes = await frame.exportAsync(FRAME_EXPORT_SETTINGS)
-  const imageUrl = bytesToDataUrl(imageBytes, 'image/png')
-  const width = formatNumber(frame.width)
-  const height = formatNumber(frame.height)
+  const children = await Promise.all(
+    frame.children
+      .filter((child) => child.visible)
+      .map((child) => renderSceneNode(child, frame.absoluteTransform)),
+  )
+  const frameBackground = await paintStyles(frame.fills)
 
   return `<!doctype html>
 <html lang="en">
@@ -120,30 +123,495 @@ async function renderFrameDocument(frame: FrameNode) {
       display: grid;
       place-items: center;
       background: #f3f4f6;
+      font-family: Inter, Arial, sans-serif;
     }
     .figma-frame {
+      position: relative;
+      width: ${formatNumber(frame.width)}px;
+      height: ${formatNumber(frame.height)}px;
+      overflow: hidden;
+      ${frameBackground}
+      ${cornerRadius(frame)}
+      ${effectsStyle(frame)}
+    }
+    .figma-node {
+      position: absolute;
+      transform-origin: 0 0;
+      background-repeat: no-repeat;
+    }
+    .figma-text {
+      white-space: pre-wrap;
+      overflow-wrap: break-word;
+    }
+    .figma-vector {
       display: block;
-      width: ${width}px;
-      height: ${height}px;
-      max-width: 100vw;
-      max-height: 100vh;
-      object-fit: contain;
+      object-fit: fill;
+      pointer-events: none;
     }
   </style>
 </head>
 <body>
-  <img class="figma-frame" src="${imageUrl}" width="${width}" height="${height}" alt="${escapeAttribute(frame.name)}">
+  <main class="figma-frame" data-name="${escapeAttribute(frame.name)}">
+${indent(children.join('\n'), 4)}
+  </main>
 </body>
 </html>
 `
+}
+
+async function renderSceneNode(node: SceneNode, parentMatrix: Matrix): Promise<string> {
+  if (!isMeasurable(node)) {
+    return ''
+  }
+
+  if (node.type === 'TEXT') {
+    return renderTextNode(node, parentMatrix)
+  }
+
+  if (isVectorLike(node)) {
+    return renderSvgNode(node, parentMatrix)
+  }
+
+  if (isContainerNode(node)) {
+    const children = await Promise.all(
+      node.children
+        .filter((child) => child.visible)
+        .map((child) => renderSceneNode(child, node.absoluteTransform)),
+    )
+
+    return `<div class="figma-node" data-name="${escapeAttribute(node.name)}" style="${await visualStyle(node, parentMatrix)}">${children.join('\n')}</div>`
+  }
+
+  if (node.type === 'RECTANGLE' || node.type === 'ELLIPSE') {
+    return `<div class="figma-node" data-name="${escapeAttribute(node.name)}" style="${await visualStyle(node, parentMatrix)}"></div>`
+  }
+
+  return renderSvgNode(node, parentMatrix)
+}
+
+async function renderTextNode(node: TextNode, parentMatrix: Matrix) {
+  const style = [
+    await visualStyle(node, parentMatrix),
+    textStyle(node),
+    await paintStyles(node.fills, 'color'),
+  ].join(' ')
+
+  return `<div class="figma-node figma-text" data-name="${escapeAttribute(node.name)}" style="${style}">${escapeHtml(applyTextCase(node.characters, node.textCase))}</div>`
+}
+
+async function renderSvgNode(node: SceneNode, parentMatrix: Matrix) {
+  const svgBytes = await node.exportAsync(SVG_EXPORT_SETTINGS)
+
+  return `<img class="figma-node figma-vector" data-name="${escapeAttribute(node.name)}" src="${bytesToDataUrl(svgBytes, 'image/svg+xml')}" alt="${escapeAttribute(node.name)}" style="${baseStyle(node, parentMatrix)} ${effectsStyle(node)}">`
+}
+
+async function visualStyle(node: SceneNode, parentMatrix: Matrix) {
+  return [
+    baseStyle(node, parentMatrix),
+    await nodePaintStyle(node),
+    strokeStyle(node),
+    cornerRadius(node),
+    blendStyle(node),
+    effectsStyle(node),
+    clipStyle(node),
+  ].join(' ')
+}
+
+function baseStyle(node: SceneNode, parentMatrix: Matrix) {
+  const matrix = relativeMatrix(parentMatrix, node.absoluteTransform)
+
+  return [
+    `width: ${formatNumber(node.width)}px;`,
+    `height: ${formatNumber(node.height)}px;`,
+    `transform: matrix(${formatNumber(matrix[0][0])}, ${formatNumber(matrix[1][0])}, ${formatNumber(matrix[0][1])}, ${formatNumber(matrix[1][1])}, ${formatNumber(matrix[0][2])}, ${formatNumber(matrix[1][2])});`,
+    `opacity: ${formatNumber(nodeOpacity(node))};`,
+  ].join(' ')
+}
+
+async function nodePaintStyle(node: SceneNode) {
+  if ('fills' in node) {
+    return paintStyles(node.fills)
+  }
+
+  return 'background: transparent;'
+}
+
+async function paintStyles(
+  paints: ReadonlyArray<Paint> | PluginAPI['mixed'],
+  property: 'background' | 'color' = 'background',
+) {
+  if (typeof paints === 'symbol') {
+    return property === 'color' ? 'color: #111827;' : 'background: transparent;'
+  }
+
+  const visiblePaints = paints.filter((paint) => paint.visible !== false)
+  if (visiblePaints.length === 0) {
+    return property === 'color' ? 'color: #111827;' : 'background: transparent;'
+  }
+
+  const layers = await Promise.all(visiblePaints.map((paint) => paintToCss(paint, property)))
+  const values = layers.filter(Boolean)
+
+  if (values.length === 0) {
+    return property === 'color' ? 'color: #111827;' : 'background: transparent;'
+  }
+
+  if (property === 'color') {
+    return `color: ${values[0]};`
+  }
+
+  return `background: ${values.reverse().join(', ')}; ${backgroundSizing(visiblePaints)}`
+}
+
+async function paintToCss(paint: Paint, property: 'background' | 'color') {
+  if (paint.type === 'SOLID') {
+    return rgba(paint.color, paint.opacity ?? 1)
+  }
+
+  if (property === 'color') {
+    return ''
+  }
+
+  if (paint.type === 'IMAGE' && paint.imageHash) {
+    const image = figma.getImageByHash(paint.imageHash)
+    if (!image) {
+      return ''
+    }
+
+    const bytes = await image.getBytesAsync()
+    return `url("${bytesToDataUrl(bytes, imageMimeType(bytes))}")`
+  }
+
+  if (paint.type === 'GRADIENT_LINEAR') {
+    return linearGradient(paint)
+  }
+
+  if (paint.type === 'GRADIENT_RADIAL') {
+    return radialGradient(paint)
+  }
+
+  return ''
+}
+
+function backgroundSizing(paints: ReadonlyArray<Paint>) {
+  const imagePaint = paints.find((paint) => paint.type === 'IMAGE')
+
+  if (!imagePaint || imagePaint.type !== 'IMAGE') {
+    return ''
+  }
+
+  if (imagePaint.scaleMode === 'FIT') {
+    return 'background-size: contain; background-position: center;'
+  }
+
+  if (imagePaint.scaleMode === 'TILE') {
+    return `background-size: ${formatNumber((imagePaint.scalingFactor ?? 1) * 100)}%; background-repeat: repeat;`
+  }
+
+  return 'background-size: cover; background-position: center;'
+}
+
+function linearGradient(paint: GradientPaint) {
+  const angle = gradientAngle(paint.gradientTransform)
+  return `linear-gradient(${formatNumber(angle)}deg, ${gradientStops(paint.gradientStops)})`
+}
+
+function radialGradient(paint: GradientPaint) {
+  return `radial-gradient(circle, ${gradientStops(paint.gradientStops)})`
+}
+
+function gradientStops(stops: ReadonlyArray<ColorStop>) {
+  return stops
+    .map((stop) => `${rgba(stop.color, stop.color.a ?? 1)} ${formatNumber(stop.position * 100)}%`)
+    .join(', ')
+}
+
+function gradientAngle(transform: Transform) {
+  const radians = Math.atan2(transform[1][0], transform[0][0])
+  return 90 + (radians * 180) / Math.PI
+}
+
+function strokeStyle(node: SceneNode) {
+  if (!('strokes' in node) || typeof node.strokes === 'symbol') {
+    return ''
+  }
+
+  const stroke = node.strokes.find((paint) => paint.visible !== false && paint.type === 'SOLID')
+  if (!stroke || stroke.type !== 'SOLID') {
+    return ''
+  }
+
+  const weight = 'strokeWeight' in node && typeof node.strokeWeight === 'number' ? node.strokeWeight : 1
+  return `border: ${formatNumber(weight)}px solid ${rgba(stroke.color, stroke.opacity ?? 1)};`
+}
+
+function cornerRadius(node: SceneNode) {
+  if (node.type === 'ELLIPSE') {
+    return 'border-radius: 50%;'
+  }
+
+  if (!('cornerRadius' in node) || typeof node.cornerRadius !== 'number') {
+    return ''
+  }
+
+  return `border-radius: ${formatNumber(node.cornerRadius)}px;`
+}
+
+function blendStyle(node: SceneNode) {
+  const styles: string[] = []
+
+  if ('blendMode' in node && node.blendMode !== 'PASS_THROUGH' && node.blendMode !== 'NORMAL') {
+    styles.push(`mix-blend-mode: ${blendModeToCss(node.blendMode)};`)
+  }
+
+  return styles.join(' ')
+}
+
+function effectsStyle(node: SceneNode) {
+  if (!('effects' in node) || typeof node.effects === 'symbol') {
+    return ''
+  }
+
+  const shadows = node.effects
+    .filter(isShadowEffect)
+    .map((effect) => {
+      const inset = effect.type === 'INNER_SHADOW' ? 'inset ' : ''
+      return `${inset}${formatNumber(effect.offset.x)}px ${formatNumber(effect.offset.y)}px ${formatNumber(effect.radius)}px ${formatNumber(effect.spread ?? 0)}px ${rgba(effect.color, effect.color.a ?? 1)}`
+    })
+
+  return shadows.length > 0 ? `box-shadow: ${shadows.join(', ')};` : ''
+}
+
+function clipStyle(node: SceneNode) {
+  if ('clipsContent' in node && node.clipsContent) {
+    return 'overflow: hidden;'
+  }
+
+  return 'overflow: visible;'
+}
+
+function nodeOpacity(node: SceneNode) {
+  return 'opacity' in node && typeof node.opacity === 'number' ? node.opacity : 1
+}
+
+function isShadowEffect(effect: Effect): effect is DropShadowEffect | InnerShadowEffect {
+  return effect.visible !== false && (effect.type === 'DROP_SHADOW' || effect.type === 'INNER_SHADOW')
+}
+
+function textStyle(node: TextNode) {
+  const fontName = node.fontName
+  const fontFamily = typeof fontName === 'symbol' ? 'Inter' : fontName.family
+  const fontStyle = typeof fontName === 'symbol' ? 'Regular' : fontName.style
+  const fontSize = typeof node.fontSize === 'symbol' ? 16 : node.fontSize
+  const lineHeight = typeof node.lineHeight === 'symbol' ? 'normal' : lineHeightValue(node.lineHeight, fontSize)
+  const letterSpacing = typeof node.letterSpacing === 'symbol' ? 'normal' : letterSpacingValue(node.letterSpacing, fontSize)
+  const decoration = typeof node.textDecoration === 'symbol' ? 'none' : textDecoration(node.textDecoration)
+
+  return [
+    `font-family: ${cssString(fontFamily)}, Arial, sans-serif;`,
+    `font-size: ${formatNumber(fontSize)}px;`,
+    `font-weight: ${fontWeight(fontStyle)};`,
+    `font-style: ${fontStyle.toLowerCase().includes('italic') ? 'italic' : 'normal'};`,
+    `line-height: ${lineHeight};`,
+    `letter-spacing: ${letterSpacing};`,
+    `text-align: ${node.textAlignHorizontal.toLowerCase()};`,
+    `text-decoration: ${decoration};`,
+    `display: flex;`,
+    `align-items: ${verticalAlign(node.textAlignVertical)};`,
+  ].join(' ')
 }
 
 function isFrameNode(node: BaseNode): node is FrameNode {
   return node.type === 'FRAME'
 }
 
+function isContainerNode(node: SceneNode): node is SceneNode & ChildrenMixin {
+  return 'children' in node
+}
+
+function isVectorLike(node: SceneNode) {
+  return (
+    node.type === 'VECTOR' ||
+    node.type === 'BOOLEAN_OPERATION' ||
+    node.type === 'STAR' ||
+    node.type === 'POLYGON' ||
+    node.type === 'LINE'
+  )
+}
+
+function isMeasurable(node: SceneNode): node is SceneNode & LayoutMixin {
+  return 'width' in node && 'height' in node && 'absoluteTransform' in node
+}
+
+function relativeMatrix(parent: Matrix, node: Matrix): Matrix {
+  return multiplyMatrix(invertMatrix(parent), node)
+}
+
+function invertMatrix(matrix: Matrix): Matrix {
+  const [a, c, e] = matrix[0]
+  const [b, d, f] = matrix[1]
+  const determinant = a * d - b * c
+
+  if (determinant === 0) {
+    return [
+      [1, 0, 0],
+      [0, 1, 0],
+    ]
+  }
+
+  return [
+    [d / determinant, -c / determinant, (c * f - d * e) / determinant],
+    [-b / determinant, a / determinant, (b * e - a * f) / determinant],
+  ]
+}
+
+function multiplyMatrix(left: Matrix, right: Matrix): Matrix {
+  return [
+    [
+      left[0][0] * right[0][0] + left[0][1] * right[1][0],
+      left[0][0] * right[0][1] + left[0][1] * right[1][1],
+      left[0][0] * right[0][2] + left[0][1] * right[1][2] + left[0][2],
+    ],
+    [
+      left[1][0] * right[0][0] + left[1][1] * right[1][0],
+      left[1][0] * right[0][1] + left[1][1] * right[1][1],
+      left[1][0] * right[0][2] + left[1][1] * right[1][2] + left[1][2],
+    ],
+  ]
+}
+
 function bytesToDataUrl(bytes: Uint8Array, mimeType: string) {
   return `data:${mimeType};base64,${figma.base64Encode(bytes)}`
+}
+
+function imageMimeType(bytes: Uint8Array) {
+  if (bytes[0] === 0xff && bytes[1] === 0xd8) {
+    return 'image/jpeg'
+  }
+
+  if (bytes[0] === 0x89 && bytes[1] === 0x50 && bytes[2] === 0x4e && bytes[3] === 0x47) {
+    return 'image/png'
+  }
+
+  if (bytes[0] === 0x47 && bytes[1] === 0x49 && bytes[2] === 0x46) {
+    return 'image/gif'
+  }
+
+  if (bytes[0] === 0x52 && bytes[1] === 0x49 && bytes[2] === 0x46 && bytes[3] === 0x46) {
+    return 'image/webp'
+  }
+
+  return 'application/octet-stream'
+}
+
+function rgba(color: RGB | RGBA, alpha = 1) {
+  const red = Math.round(color.r * 255)
+  const green = Math.round(color.g * 255)
+  const blue = Math.round(color.b * 255)
+  const colorAlpha = 'a' in color ? color.a : 1
+
+  return `rgba(${red}, ${green}, ${blue}, ${formatNumber(colorAlpha * alpha)})`
+}
+
+function lineHeightValue(lineHeight: LineHeight, fontSize: number) {
+  if (lineHeight.unit === 'PIXELS') {
+    return `${formatNumber(lineHeight.value)}px`
+  }
+
+  if (lineHeight.unit === 'PERCENT') {
+    return `${formatNumber((lineHeight.value / 100) * fontSize)}px`
+  }
+
+  return 'normal'
+}
+
+function letterSpacingValue(letterSpacing: LetterSpacing, fontSize: number) {
+  if (letterSpacing.unit === 'PIXELS') {
+    return `${formatNumber(letterSpacing.value)}px`
+  }
+
+  return `${formatNumber((letterSpacing.value / 100) * fontSize)}px`
+}
+
+function verticalAlign(value: TextNode['textAlignVertical']) {
+  if (value === 'CENTER') {
+    return 'center'
+  }
+
+  if (value === 'BOTTOM') {
+    return 'flex-end'
+  }
+
+  return 'flex-start'
+}
+
+function textDecoration(value: TextDecoration) {
+  if (value === 'UNDERLINE') {
+    return 'underline'
+  }
+
+  if (value === 'STRIKETHROUGH') {
+    return 'line-through'
+  }
+
+  return 'none'
+}
+
+function applyTextCase(value: string, textCase: TextCase | PluginAPI['mixed']) {
+  if (typeof textCase === 'symbol' || textCase === 'ORIGINAL') {
+    return value
+  }
+
+  if (textCase === 'UPPER') {
+    return value.toUpperCase()
+  }
+
+  if (textCase === 'LOWER') {
+    return value.toLowerCase()
+  }
+
+  if (textCase === 'TITLE') {
+    return value.replace(/\S+/g, (word) => word.charAt(0).toUpperCase() + word.slice(1).toLowerCase())
+  }
+
+  return value
+}
+
+function fontWeight(style: string) {
+  const normalized = style.toLowerCase()
+
+  if (normalized.includes('thin')) return 100
+  if (normalized.includes('extra light') || normalized.includes('extralight')) return 200
+  if (normalized.includes('light')) return 300
+  if (normalized.includes('medium')) return 500
+  if (normalized.includes('semi bold') || normalized.includes('semibold')) return 600
+  if (normalized.includes('extra bold') || normalized.includes('extrabold')) return 800
+  if (normalized.includes('bold')) return 700
+  if (normalized.includes('black')) return 900
+
+  return 400
+}
+
+function blendModeToCss(blendMode: BlendMode) {
+  const modes: Record<string, string> = {
+    DARKEN: 'darken',
+    MULTIPLY: 'multiply',
+    COLOR_BURN: 'color-burn',
+    LIGHTEN: 'lighten',
+    SCREEN: 'screen',
+    COLOR_DODGE: 'color-dodge',
+    OVERLAY: 'overlay',
+    SOFT_LIGHT: 'soft-light',
+    HARD_LIGHT: 'hard-light',
+    DIFFERENCE: 'difference',
+    EXCLUSION: 'exclusion',
+    HUE: 'hue',
+    SATURATION: 'saturation',
+    COLOR: 'color',
+    LUMINOSITY: 'luminosity',
+  }
+
+  return modes[blendMode] ?? 'normal'
 }
 
 function uniqueFileName(name: string, usedNames: Set<string>) {
@@ -179,6 +647,10 @@ function formatNumber(value: number) {
   return Number(value.toFixed(3)).toString()
 }
 
+function cssString(value: string) {
+  return `"${value.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`
+}
+
 function escapeHtml(value: string) {
   return value
     .replace(/&/g, '&amp;')
@@ -190,4 +662,13 @@ function escapeHtml(value: string) {
 
 function escapeAttribute(value: string) {
   return escapeHtml(value).replace(/`/g, '&#096;')
+}
+
+function indent(value: string, spaces: number) {
+  const padding = ' '.repeat(spaces)
+  return value
+    .split('\n')
+    .filter((line) => line.length > 0)
+    .map((line) => `${padding}${line}`)
+    .join('\n')
 }
