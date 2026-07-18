@@ -5,7 +5,7 @@ type ExportFile = {
 
 type UIMessage =
   | { type: 'refresh-selection' }
-  | { type: 'export-frames'; frameIds: string[] }
+  | { type: 'export-frames'; frameIds: string[]; fontFallback?: string }
   | { type: 'cancel' }
 
 type Matrix = [[number, number, number], [number, number, number]]
@@ -17,6 +17,9 @@ const SVG_EXPORT_SETTINGS: ExportSettingsSVGString = {
   svgSimplifyStroke: false,
   colorProfile: 'DOCUMENT',
 }
+
+const DEFAULT_FONT_FALLBACK =
+  '-apple-system, BlinkMacSystemFont, Segoe UI, Roboto, Oxygen, Ubuntu, Cantarell, Fira Sans, Droid Sans, Helvetica Neue, sans-serif'
 
 figma.showUI(__html__, { width: 420, height: 480, themeColors: true })
 
@@ -36,7 +39,7 @@ figma.ui.onmessage = async (msg: UIMessage) => {
   }
 
   if (msg.type === 'export-frames') {
-    await exportFrames(msg.frameIds)
+    await exportFrames(msg.frameIds, msg.fontFallback)
   }
 }
 
@@ -58,11 +61,12 @@ function postSelection() {
   })
 }
 
-async function exportFrames(frameIds: string[]) {
+async function exportFrames(frameIds: string[], fontFallbackInput?: string) {
   try {
     const frames = await resolveFrames(frameIds)
     const files: ExportFile[] = []
     const usedNames = new Set<string>()
+    const fontFallback = normalizeFontFallback(fontFallbackInput)
 
     for (let index = 0; index < frames.length; index += 1) {
       const frame = frames[index]
@@ -75,7 +79,7 @@ async function exportFrames(frameIds: string[]) {
 
       files.push({
         name: uniqueFileName(frame.name, usedNames),
-        html: await renderFrameDocument(frame),
+        html: await renderFrameDocument(frame, fontFallback),
       })
     }
 
@@ -105,13 +109,13 @@ async function resolveFrames(frameIds: string[]) {
   return frames
 }
 
-async function renderFrameDocument(frame: FrameNode) {
+async function renderFrameDocument(frame: FrameNode, fontFallback: string) {
   await loadFonts(frame)
 
   const children = await Promise.all(
     frame.children
       .filter((child) => child.visible)
-      .map((child) => safeRenderSceneNode(child, frame.absoluteTransform)),
+      .map((child) => safeRenderSceneNode(child, frame.absoluteTransform, fontFallback)),
   )
   const frameBackground = await paintStyles(frame.fills, 'background', frame)
 
@@ -170,13 +174,13 @@ ${indent(children.join('\n'), 4)}
 `
 }
 
-async function renderSceneNode(node: SceneNode, parentMatrix: Matrix): Promise<string> {
+async function renderSceneNode(node: SceneNode, parentMatrix: Matrix, fontFallback: string): Promise<string> {
   if (!isMeasurable(node)) {
     return ''
   }
 
   if (node.type === 'TEXT') {
-    return renderTextNode(node, parentMatrix)
+    return renderTextNode(node, parentMatrix, fontFallback)
   }
 
   if (isVectorLike(node)) {
@@ -187,7 +191,7 @@ async function renderSceneNode(node: SceneNode, parentMatrix: Matrix): Promise<s
     const children = await Promise.all(
       node.children
         .filter((child) => child.visible)
-        .map((child) => safeRenderSceneNode(child, node.absoluteTransform)),
+        .map((child) => safeRenderSceneNode(child, node.absoluteTransform, fontFallback)),
     )
 
     return `<div class="figma-node" data-name="${escapeAttribute(node.name)}" style="${await visualStyle(node, parentMatrix)}">${children.join('\n')}</div>`
@@ -200,17 +204,17 @@ async function renderSceneNode(node: SceneNode, parentMatrix: Matrix): Promise<s
   return renderSvgNode(node, parentMatrix)
 }
 
-async function renderTextNode(node: TextNode, parentMatrix: Matrix) {
+async function renderTextNode(node: TextNode, parentMatrix: Matrix, fontFallback: string) {
   const style = textContainerStyle(node, parentMatrix)
-  const contentStyle = await textBlockStyle(node)
-  const text = await renderTextContent(node, contentStyle)
+  const contentStyle = await textBlockStyle(node, fontFallback)
+  const text = await renderTextContent(node, contentStyle, fontFallback)
 
   return `<div class="figma-node figma-text" data-name="${escapeAttribute(node.name)}" style="${style}"><div style="${contentStyle}">${text}</div></div>`
 }
 
-async function safeRenderSceneNode(node: SceneNode, parentMatrix: Matrix) {
+async function safeRenderSceneNode(node: SceneNode, parentMatrix: Matrix, fontFallback: string) {
   try {
-    return await renderSceneNode(node, parentMatrix)
+    return await renderSceneNode(node, parentMatrix, fontFallback)
   } catch (error) {
     return `<!-- Skipped ${escapeHtml(node.type)} "${escapeHtml(node.name)}": ${escapeHtml(errorMessage(error))} -->`
   }
@@ -466,12 +470,12 @@ function isShadowEffect(effect: Effect): effect is DropShadowEffect | InnerShado
   return effect.visible !== false && (effect.type === 'DROP_SHADOW' || effect.type === 'INNER_SHADOW')
 }
 
-async function textBlockStyle(node: TextNode) {
-  const css = await node.getCSSAsync().catch(() => ({}))
+async function textBlockStyle(node: TextNode, fontFallback: string) {
+  const css: { [key: string]: string } = await node.getCSSAsync().catch(() => ({}))
 
   return [
+    cssFontFamilyStyle(css['font-family'], fontFallback),
     cssToInlineStyle(css, [
-      'font-family',
       'font-size',
       'font-style',
       'font-weight',
@@ -491,7 +495,7 @@ async function textBlockStyle(node: TextNode) {
   ].join(' ')
 }
 
-async function renderTextContent(node: TextNode, contentStyle: string) {
+async function renderTextContent(node: TextNode, contentStyle: string, fontFallback: string) {
   const boundaries = node.getStyledTextSegments([
     'fontName',
     'fontSize',
@@ -517,7 +521,7 @@ async function renderTextContent(node: TextNode, contentStyle: string) {
     boundaries.map(async (segment) => {
       const range = readTextRangeStyle(node, segment.start, segment.end)
       const style = [
-        rangeTextStyle(range),
+        rangeTextStyle(range, fontFallback),
         await paintStyles(range.fills, 'color', node),
       ].join(' ')
 
@@ -554,7 +558,7 @@ function normalizeMixed<T>(value: T | symbol): T | symbol {
   return typeof value === 'symbol' ? figma.mixed : value
 }
 
-function rangeTextStyle(range: ReturnType<typeof readTextRangeStyle>) {
+function rangeTextStyle(range: ReturnType<typeof readTextRangeStyle>, fontFallback: string) {
   const fontName = range.fontName
   const fontFamily = typeof fontName === 'symbol' ? 'Inter' : fontName.family
   const fontStyle = typeof fontName === 'symbol' ? 'Regular' : fontName.style
@@ -567,7 +571,7 @@ function rangeTextStyle(range: ReturnType<typeof readTextRangeStyle>) {
   const decoration = typeof range.textDecoration === 'symbol' ? 'none' : textDecoration(range.textDecoration)
 
   return [
-    `font-family: ${cssString(fontFamily)}, Arial, sans-serif;`,
+    `font-family: ${appendFontFallback(cssFontFamilyName(fontFamily), fontFallback)};`,
     `font-size: ${formatNumber(fontSize)}px;`,
     `font-weight: ${fontWeightValue};`,
     `font-style: ${fontStyle.toLowerCase().includes('italic') ? 'italic' : 'normal'};`,
@@ -617,6 +621,41 @@ function cssToInlineStyle(css: { [key: string]: string }, properties: string[]) 
       return value ? [`${property}: ${value};`] : []
     })
     .join(' ')
+}
+
+function cssFontFamilyStyle(primaryFontFamily: string | undefined, fontFallback: string) {
+  const primary = primaryFontFamily?.trim()
+
+  if (!primary && !fontFallback) {
+    return ''
+  }
+
+  return `font-family: ${appendFontFallback(primary ?? '', fontFallback)};`
+}
+
+function appendFontFallback(primaryFontFamily: string, fontFallback: string) {
+  if (!primaryFontFamily) {
+    return fontFallback
+  }
+
+  if (!fontFallback) {
+    return primaryFontFamily
+  }
+
+  return `${primaryFontFamily}, ${fontFallback}`
+}
+
+function normalizeFontFallback(value: string | undefined) {
+  const fallback = (value || DEFAULT_FONT_FALLBACK)
+    .trim()
+    .replace(/^font-family\s*:\s*/i, '')
+    .replace(/;+\s*$/, '')
+
+  return fallback || DEFAULT_FONT_FALLBACK
+}
+
+function cssFontFamilyName(value: string) {
+  return /^[a-zA-Z0-9_-]+$/.test(value) ? value : cssString(value)
 }
 
 function prefixSvgIds(svg: string, prefix: string) {

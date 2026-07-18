@@ -12,6 +12,13 @@
     <span>Select Frames on the canvas, then refresh.</span>
   </section>
 
+  <section class="settings">
+    <label class="field" for="font-fallback">
+      <span>Font family fallback</span>
+      <input id="font-fallback" type="text" spellcheck="false">
+    </label>
+  </section>
+
   <form id="frame-form" class="frames" hidden>
     <div class="toolbar">
       <label><input id="select-all" type="checkbox" checked> Select all</label>
@@ -145,6 +152,35 @@
     margin: 0;
   }
 
+  input[type='text'] {
+    width: 100%;
+    min-height: 32px;
+    border: 1px solid var(--figma-color-border, #d1d5db);
+    border-radius: 6px;
+    padding: 6px 8px;
+    background: var(--figma-color-bg, #ffffff);
+    color: var(--figma-color-text, #1f2937);
+    font: inherit;
+  }
+
+  .settings {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+
+  .field {
+    display: flex;
+    flex-direction: column;
+    align-items: stretch;
+    gap: 6px;
+  }
+
+  .field span {
+    color: var(--figma-color-text-secondary, #6b7280);
+    font-weight: 600;
+  }
+
   .frame-list {
     min-height: 0;
     overflow: auto;
@@ -194,6 +230,9 @@
 </style>
 
 <script>
+  const DEFAULT_FONT_FALLBACK = '-apple-system, BlinkMacSystemFont, Segoe UI, Roboto, Oxygen, Ubuntu, Cantarell, Fira Sans, Droid Sans, Helvetica Neue, sans-serif'
+  const FONT_FALLBACK_STORAGE_KEY = 'html-exporter-font-fallback'
+
   const state = {
     frames: [],
     selectedIds: new Set(),
@@ -209,7 +248,13 @@
   const exportButton = document.getElementById('export')
   const refreshButton = document.getElementById('refresh')
   const cancelButton = document.getElementById('cancel')
+  const fontFallback = document.getElementById('font-fallback')
   const status = document.getElementById('status')
+
+  fontFallback.value = localStorage.getItem(FONT_FALLBACK_STORAGE_KEY) || DEFAULT_FONT_FALLBACK
+  fontFallback.oninput = () => {
+    localStorage.setItem(FONT_FALLBACK_STORAGE_KEY, fontFallback.value)
+  }
 
   refreshButton.onclick = () => post({ type: 'refresh-selection' })
   cancelButton.onclick = () => post({ type: 'cancel' })
@@ -223,7 +268,7 @@
     }
 
     setExporting(true)
-    post({ type: 'export-frames', frameIds })
+    post({ type: 'export-frames', frameIds, fontFallback: fontFallback.value })
   }
 
   selectAll.onchange = () => {
@@ -443,6 +488,7 @@
     exportButton.disabled = value || state.selectedIds.size === 0
     refreshButton.disabled = value
     selectAll.disabled = value
+    fontFallback.disabled = value
   }
 
   function setStatus(message, isError = false) {
