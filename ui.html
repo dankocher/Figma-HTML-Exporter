@@ -1,0 +1,446 @@
+<div class="app">
+  <header>
+    <div>
+      <h1>HTML Exporter</h1>
+      <p id="summary">Select one or more Frames in Figma.</p>
+    </div>
+    <button id="refresh" type="button" title="Refresh selection">Refresh</button>
+  </header>
+
+  <section id="empty" class="empty">
+    <strong>No Frames selected</strong>
+    <span>Select Frames on the canvas, then refresh.</span>
+  </section>
+
+  <form id="frame-form" class="frames" hidden>
+    <div class="toolbar">
+      <label><input id="select-all" type="checkbox" checked> Select all</label>
+      <span id="count"></span>
+    </div>
+    <div id="frame-list" class="frame-list"></div>
+  </form>
+
+  <footer>
+    <button id="cancel" type="button" class="secondary">Cancel</button>
+    <button id="export" type="button">Export HTML</button>
+  </footer>
+
+  <div id="status" class="status" role="status" aria-live="polite"></div>
+</div>
+
+<style>
+  :root {
+    color: var(--figma-color-text, #1f2937);
+    background: var(--figma-color-bg, #ffffff);
+    font: 12px/1.4 Inter, Arial, sans-serif;
+  }
+
+  * {
+    box-sizing: border-box;
+  }
+
+  body {
+    margin: 0;
+    background: var(--figma-color-bg, #ffffff);
+  }
+
+  .app {
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    padding: 16px;
+  }
+
+  header {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 12px;
+  }
+
+  h1 {
+    margin: 0 0 4px;
+    font-size: 16px;
+    line-height: 1.2;
+  }
+
+  p {
+    margin: 0;
+    color: var(--figma-color-text-secondary, #6b7280);
+  }
+
+  button {
+    min-height: 32px;
+    border: 1px solid var(--figma-color-border, #d1d5db);
+    border-radius: 6px;
+    padding: 0 12px;
+    background: var(--figma-color-bg-brand, #2563eb);
+    color: var(--figma-color-text-onbrand, #ffffff);
+    font: inherit;
+    font-weight: 600;
+    cursor: pointer;
+  }
+
+  button:hover {
+    filter: brightness(0.96);
+  }
+
+  button:disabled {
+    cursor: not-allowed;
+    opacity: 0.55;
+  }
+
+  button.secondary,
+  #refresh {
+    background: var(--figma-color-bg-secondary, #f9fafb);
+    color: var(--figma-color-text, #1f2937);
+  }
+
+  .empty {
+    display: flex;
+    flex: 1;
+    min-height: 300px;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+    border: 1px dashed var(--figma-color-border, #d1d5db);
+    border-radius: 8px;
+    color: var(--figma-color-text-secondary, #6b7280);
+    text-align: center;
+  }
+
+  .empty strong {
+    color: var(--figma-color-text, #1f2937);
+  }
+
+  .frames {
+    min-height: 0;
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+  }
+
+  .toolbar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    color: var(--figma-color-text-secondary, #6b7280);
+  }
+
+  label {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+
+  input[type='checkbox'] {
+    width: 14px;
+    height: 14px;
+    margin: 0;
+  }
+
+  .frame-list {
+    min-height: 0;
+    overflow: auto;
+    border: 1px solid var(--figma-color-border, #d1d5db);
+    border-radius: 8px;
+  }
+
+  .frame-row {
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr);
+    gap: 10px;
+    padding: 10px;
+    border-bottom: 1px solid var(--figma-color-border, #e5e7eb);
+  }
+
+  .frame-row:last-child {
+    border-bottom: 0;
+  }
+
+  .frame-name {
+    display: block;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-weight: 600;
+  }
+
+  .frame-meta {
+    display: block;
+    color: var(--figma-color-text-secondary, #6b7280);
+  }
+
+  footer {
+    display: flex;
+    justify-content: flex-end;
+    gap: 8px;
+  }
+
+  .status {
+    min-height: 18px;
+    color: var(--figma-color-text-secondary, #6b7280);
+  }
+
+  .status.error {
+    color: var(--figma-color-text-danger, #b91c1c);
+  }
+</style>
+
+<script>
+  const state = {
+    frames: [],
+    selectedIds: new Set(),
+    exporting: false,
+  }
+
+  const summary = document.getElementById('summary')
+  const empty = document.getElementById('empty')
+  const frameForm = document.getElementById('frame-form')
+  const frameList = document.getElementById('frame-list')
+  const count = document.getElementById('count')
+  const selectAll = document.getElementById('select-all')
+  const exportButton = document.getElementById('export')
+  const refreshButton = document.getElementById('refresh')
+  const cancelButton = document.getElementById('cancel')
+  const status = document.getElementById('status')
+
+  refreshButton.onclick = () => post({ type: 'refresh-selection' })
+  cancelButton.onclick = () => post({ type: 'cancel' })
+
+  exportButton.onclick = () => {
+    const frameIds = Array.from(state.selectedIds)
+
+    if (frameIds.length === 0) {
+      setStatus('Select at least one Frame to export.', true)
+      return
+    }
+
+    setExporting(true)
+    post({ type: 'export-frames', frameIds })
+  }
+
+  selectAll.onchange = () => {
+    state.selectedIds = selectAll.checked ? new Set(state.frames.map((frame) => frame.id)) : new Set()
+    render()
+  }
+
+  window.onmessage = async (event) => {
+    const message = event.data.pluginMessage
+
+    if (!message) {
+      return
+    }
+
+    if (message.type === 'selection-update') {
+      state.frames = message.frames
+      state.selectedIds = new Set(message.frames.map((frame) => frame.id))
+      setStatus(message.ignoredCount > 0 ? `${message.ignoredCount} selected layer(s) ignored because they are not Frames.` : '')
+      render()
+      return
+    }
+
+    if (message.type === 'export-progress') {
+      setStatus(`Exporting ${message.current}/${message.total}: ${message.name}`)
+      return
+    }
+
+    if (message.type === 'export-result') {
+      try {
+        await saveFiles(message.files)
+        setStatus(`Exported ${message.files.length} file(s).`)
+      } catch (error) {
+        setStatus(error instanceof Error ? error.message : 'Unable to save files.', true)
+      } finally {
+        setExporting(false)
+      }
+      return
+    }
+
+    if (message.type === 'export-error') {
+      setStatus(message.message, true)
+      setExporting(false)
+    }
+  }
+
+  function render() {
+    const hasFrames = state.frames.length > 0
+
+    empty.hidden = hasFrames
+    frameForm.hidden = !hasFrames
+    exportButton.disabled = state.exporting || state.selectedIds.size === 0
+    summary.textContent = hasFrames
+      ? `${state.frames.length} Frame(s) selected.`
+      : 'Select one or more Frames in Figma.'
+    count.textContent = `${state.selectedIds.size}/${state.frames.length} selected`
+    selectAll.checked = hasFrames && state.selectedIds.size === state.frames.length
+    selectAll.indeterminate = state.selectedIds.size > 0 && state.selectedIds.size < state.frames.length
+
+    frameList.innerHTML = ''
+
+    for (const frame of state.frames) {
+      const row = document.createElement('label')
+      row.className = 'frame-row'
+
+      const checkbox = document.createElement('input')
+      checkbox.type = 'checkbox'
+      checkbox.checked = state.selectedIds.has(frame.id)
+      checkbox.onchange = () => {
+        if (checkbox.checked) {
+          state.selectedIds.add(frame.id)
+        } else {
+          state.selectedIds.delete(frame.id)
+        }
+        render()
+      }
+
+      const content = document.createElement('span')
+
+      const name = document.createElement('span')
+      name.className = 'frame-name'
+      name.textContent = frame.name
+
+      const meta = document.createElement('span')
+      meta.className = 'frame-meta'
+      meta.textContent = `${Math.round(frame.width)} x ${Math.round(frame.height)} px · ${frame.childCount} layer(s)`
+
+      content.append(name, meta)
+      row.append(checkbox, content)
+      frameList.append(row)
+    }
+  }
+
+  async function saveFiles(files) {
+    if ('showDirectoryPicker' in window) {
+      try {
+        const directory = await window.showDirectoryPicker({ mode: 'readwrite' })
+
+        for (const file of files) {
+          const handle = await directory.getFileHandle(file.name, { create: true })
+          const writable = await handle.createWritable()
+          await writable.write(new Blob([file.html], { type: 'text/html;charset=utf-8' }))
+          await writable.close()
+        }
+
+        return
+      } catch (error) {
+        if (error && error.name === 'AbortError') {
+          throw new Error('Export cancelled.')
+        }
+      }
+    }
+
+    downloadBlob(createZip(files), 'figma-html-export.zip', 'application/zip')
+  }
+
+  function createZip(files) {
+    const encoder = new TextEncoder()
+    const localParts = []
+    const centralParts = []
+    let offset = 0
+
+    for (const file of files) {
+      const nameBytes = encoder.encode(file.name)
+      const data = encoder.encode(file.html)
+      const crc = crc32(data)
+
+      const localHeader = new Uint8Array(30 + nameBytes.length)
+      const localView = new DataView(localHeader.buffer)
+      localView.setUint32(0, 0x04034b50, true)
+      localView.setUint16(4, 20, true)
+      localView.setUint16(6, 0x0800, true)
+      localView.setUint16(8, 0, true)
+      localView.setUint16(10, 0, true)
+      localView.setUint16(12, 0, true)
+      localView.setUint32(14, crc, true)
+      localView.setUint32(18, data.length, true)
+      localView.setUint32(22, data.length, true)
+      localView.setUint16(26, nameBytes.length, true)
+      localHeader.set(nameBytes, 30)
+
+      localParts.push(localHeader, data)
+
+      const centralHeader = new Uint8Array(46 + nameBytes.length)
+      const centralView = new DataView(centralHeader.buffer)
+      centralView.setUint32(0, 0x02014b50, true)
+      centralView.setUint16(4, 20, true)
+      centralView.setUint16(6, 20, true)
+      centralView.setUint16(8, 0x0800, true)
+      centralView.setUint16(10, 0, true)
+      centralView.setUint16(12, 0, true)
+      centralView.setUint16(14, 0, true)
+      centralView.setUint32(16, crc, true)
+      centralView.setUint32(20, data.length, true)
+      centralView.setUint32(24, data.length, true)
+      centralView.setUint16(28, nameBytes.length, true)
+      centralView.setUint32(42, offset, true)
+      centralHeader.set(nameBytes, 46)
+
+      centralParts.push(centralHeader)
+      offset += localHeader.length + data.length
+    }
+
+    const centralSize = centralParts.reduce((sum, part) => sum + part.length, 0)
+    const end = new Uint8Array(22)
+    const endView = new DataView(end.buffer)
+    endView.setUint32(0, 0x06054b50, true)
+    endView.setUint16(8, files.length, true)
+    endView.setUint16(10, files.length, true)
+    endView.setUint32(12, centralSize, true)
+    endView.setUint32(16, offset, true)
+
+    return new Blob([...localParts, ...centralParts, end], { type: 'application/zip' })
+  }
+
+  function crc32(bytes) {
+    let crc = -1
+
+    for (let index = 0; index < bytes.length; index += 1) {
+      crc = (crc >>> 8) ^ crcTable[(crc ^ bytes[index]) & 0xff]
+    }
+
+    return (crc ^ -1) >>> 0
+  }
+
+  const crcTable = Array.from({ length: 256 }, (_, index) => {
+    let value = index
+
+    for (let bit = 0; bit < 8; bit += 1) {
+      value = value & 1 ? 0xedb88320 ^ (value >>> 1) : value >>> 1
+    }
+
+    return value >>> 0
+  })
+
+  function downloadBlob(blob, name, type) {
+    const url = URL.createObjectURL(blob.type ? blob : new Blob([blob], { type }))
+    const link = document.createElement('a')
+    link.href = url
+    link.download = name
+    document.body.append(link)
+    link.click()
+    link.remove()
+    URL.revokeObjectURL(url)
+  }
+
+  function post(message) {
+    parent.postMessage({ pluginMessage: message }, '*')
+  }
+
+  function setExporting(value) {
+    state.exporting = value
+    exportButton.disabled = value || state.selectedIds.size === 0
+    refreshButton.disabled = value
+    selectAll.disabled = value
+  }
+
+  function setStatus(message, isError = false) {
+    status.textContent = message
+    status.classList.toggle('error', isError)
+  }
+
+  post({ type: 'refresh-selection' })
+</script>
