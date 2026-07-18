@@ -433,6 +433,38 @@ function isColorValue(value: VariableValue): value is RGB | RGBA {
   return typeof value === 'object' && value !== null && 'r' in value && 'g' in value && 'b' in value
 }
 
+function strokeWeights(node: SceneNode) {
+  if (hasIndividualStrokes(node)) {
+    return {
+      top: node.strokeTopWeight,
+      right: node.strokeRightWeight,
+      bottom: node.strokeBottomWeight,
+      left: node.strokeLeftWeight,
+    }
+  }
+
+  const weight = 'strokeWeight' in node && typeof node.strokeWeight === 'number' ? node.strokeWeight : 0
+
+  return {
+    top: weight,
+    right: weight,
+    bottom: weight,
+    left: weight,
+  }
+}
+
+function sideBorderStyle(side: 'top' | 'right' | 'bottom' | 'left', weight: number, style: string, color: string) {
+  return weight > 0 ? `border-${side}: ${formatNumber(weight)}px ${style} ${color};` : `border-${side}: 0;`
+}
+
+function strokeBorderStyle(node: SceneNode) {
+  if ('dashPattern' in node && node.dashPattern.length > 0) {
+    return node.dashPattern.length === 2 && node.dashPattern[0] <= 1 ? 'dotted' : 'dashed'
+  }
+
+  return 'solid'
+}
+
 async function strokeStyle(node: SceneNode) {
   if (!('strokes' in node) || typeof node.strokes === 'symbol') {
     return ''
@@ -443,14 +475,48 @@ async function strokeStyle(node: SceneNode) {
     return ''
   }
 
-  const weight = 'strokeWeight' in node && typeof node.strokeWeight === 'number' ? node.strokeWeight : 1
   const color = await resolvePaintColor(stroke, node)
-  return `border: ${formatNumber(weight)}px solid ${rgba(color, stroke.opacity ?? 1)};`
+  const strokeColor = rgba(color, stroke.opacity ?? 1)
+  const style = strokeBorderStyle(node)
+  const weights = strokeWeights(node)
+
+  if (weights.top === weights.right && weights.right === weights.bottom && weights.bottom === weights.left) {
+    return weights.top > 0 ? `border: ${formatNumber(weights.top)}px ${style} ${strokeColor};` : ''
+  }
+
+  return [
+    sideBorderStyle('top', weights.top, style, strokeColor),
+    sideBorderStyle('right', weights.right, style, strokeColor),
+    sideBorderStyle('bottom', weights.bottom, style, strokeColor),
+    sideBorderStyle('left', weights.left, style, strokeColor),
+  ].join(' ')
+}
+
+function hasIndividualStrokes(node: SceneNode): node is SceneNode & IndividualStrokesMixin {
+  return (
+    'strokeTopWeight' in node &&
+    'strokeRightWeight' in node &&
+    'strokeBottomWeight' in node &&
+    'strokeLeftWeight' in node
+  )
+}
+
+function hasIndependentCornerRadius(node: SceneNode): node is SceneNode & RectangleCornerMixin {
+  return (
+    'topLeftRadius' in node &&
+    'topRightRadius' in node &&
+    'bottomRightRadius' in node &&
+    'bottomLeftRadius' in node
+  )
 }
 
 function cornerRadius(node: SceneNode) {
   if (node.type === 'ELLIPSE') {
     return 'border-radius: 50%;'
+  }
+
+  if (hasIndependentCornerRadius(node)) {
+    return `border-radius: ${formatNumber(node.topLeftRadius)}px ${formatNumber(node.topRightRadius)}px ${formatNumber(node.bottomRightRadius)}px ${formatNumber(node.bottomLeftRadius)}px;`
   }
 
   if (!('cornerRadius' in node) || typeof node.cornerRadius !== 'number') {
