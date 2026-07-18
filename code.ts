@@ -109,7 +109,7 @@ async function renderFrameDocument(frame: FrameNode) {
       .filter((child) => child.visible)
       .map((child) => safeRenderSceneNode(child, frame.absoluteTransform)),
   )
-  const frameBackground = await paintStyles(frame.fills)
+  const frameBackground = await paintStyles(frame.fills, 'background', frame)
 
   return `<!doctype html>
 <html lang="en">
@@ -200,7 +200,7 @@ async function renderTextNode(node: TextNode, parentMatrix: Matrix) {
   const style = textContainerStyle(node, parentMatrix)
   const contentStyle = [
     textStyle(node),
-    await paintStyles(node.fills, 'color'),
+    await paintStyles(node.fills, 'color', node),
   ].join(' ')
   const text = await renderTextContent(node)
 
@@ -227,7 +227,7 @@ async function visualStyle(node: SceneNode, parentMatrix: Matrix) {
   return [
     baseStyle(node, parentMatrix),
     await nodePaintStyle(node),
-    strokeStyle(node),
+    await strokeStyle(node),
     cornerRadius(node),
     blendStyle(node),
     effectsStyle(node),
@@ -261,7 +261,7 @@ function textContainerStyle(node: TextNode, parentMatrix: Matrix) {
 
 async function nodePaintStyle(node: SceneNode) {
   if ('fills' in node) {
-    return paintStyles(node.fills)
+    return paintStyles(node.fills, 'background', node)
   }
 
   return 'background: transparent;'
@@ -270,6 +270,7 @@ async function nodePaintStyle(node: SceneNode) {
 async function paintStyles(
   paints: ReadonlyArray<Paint> | PluginAPI['mixed'],
   property: 'background' | 'color' = 'background',
+  consumer?: SceneNode,
 ) {
   if (typeof paints === 'symbol') {
     return property === 'color' ? 'color: #111827;' : 'background: transparent;'
@@ -280,7 +281,7 @@ async function paintStyles(
     return property === 'color' ? 'color: #111827;' : 'background: transparent;'
   }
 
-  const layers = await Promise.all(visiblePaints.map((paint) => paintToCss(paint, property)))
+  const layers = await Promise.all(visiblePaints.map((paint) => paintToCss(paint, property, consumer)))
   const values = layers.filter(Boolean)
 
   if (values.length === 0) {
@@ -294,9 +295,10 @@ async function paintStyles(
   return `background: ${values.reverse().join(', ')}; ${backgroundSizing(visiblePaints)}`
 }
 
-async function paintToCss(paint: Paint, property: 'background' | 'color') {
+async function paintToCss(paint: Paint, property: 'background' | 'color', consumer?: SceneNode) {
   if (paint.type === 'SOLID') {
-    return rgba(paint.color, paint.opacity ?? 1)
+    const color = await resolvePaintColor(paint, consumer)
+    return rgba(color, paint.opacity ?? 1)
   }
 
   if (property === 'color') {
@@ -366,7 +368,36 @@ function gradientAngle(transform: Transform) {
   return 90 + (radians * 180) / Math.PI
 }
 
-function strokeStyle(node: SceneNode) {
+async function resolvePaintColor(paint: SolidPaint, consumer?: SceneNode) {
+  if (consumer && paint.boundVariables?.color) {
+    const color = await resolveColorVariable(paint.boundVariables.color, consumer)
+    if (color) {
+      return color
+    }
+  }
+
+  return paint.color
+}
+
+async function resolveColorVariable(alias: VariableAlias, consumer: SceneNode) {
+  const variable = await figma.variables.getVariableByIdAsync(alias.id).catch(() => null)
+  if (!variable) {
+    return null
+  }
+
+  const resolved = variable.resolveForConsumer(consumer)
+  if (resolved.resolvedType !== 'COLOR' || !isColorValue(resolved.value)) {
+    return null
+  }
+
+  return resolved.value
+}
+
+function isColorValue(value: VariableValue): value is RGB | RGBA {
+  return typeof value === 'object' && value !== null && 'r' in value && 'g' in value && 'b' in value
+}
+
+async function strokeStyle(node: SceneNode) {
   if (!('strokes' in node) || typeof node.strokes === 'symbol') {
     return ''
   }
@@ -377,7 +408,8 @@ function strokeStyle(node: SceneNode) {
   }
 
   const weight = 'strokeWeight' in node && typeof node.strokeWeight === 'number' ? node.strokeWeight : 1
-  return `border: ${formatNumber(weight)}px solid ${rgba(stroke.color, stroke.opacity ?? 1)};`
+  const color = await resolvePaintColor(stroke, node)
+  return `border: ${formatNumber(weight)}px solid ${rgba(color, stroke.opacity ?? 1)};`
 }
 
 function cornerRadius(node: SceneNode) {
@@ -469,7 +501,7 @@ async function renderTextContent(node: TextNode) {
     'textDecoration',
   ])
 
-  if (segments.length <= 1) {
+  if (segments.length === 0) {
     return escapeHtml(applyTextCase(node.characters, node.textCase))
   }
 
@@ -477,7 +509,7 @@ async function renderTextContent(node: TextNode) {
     segments.map(async (segment) => {
       const style = [
         segmentTextStyle(segment),
-        await paintStyles(segment.fills, 'color'),
+        await paintStyles(segment.fills, 'color', node),
       ].join(' ')
 
       return `<span style="${style}">${escapeHtml(applyTextCase(segment.characters, segment.textCase))}</span>`
@@ -532,8 +564,7 @@ function normalizeSvg(svg: string, nodeId: string) {
 
   return prefixSvgIds(svg, prefix)
     .replace(/<script[\s\S]*?<\/script>/gi, '')
-    .replace(/\s(width|height)="[^"]*"/gi, '')
-    .replace(/<svg\b(?![^>]*\bpreserveAspectRatio=)/i, '<svg preserveAspectRatio="xMidYMid meet"')
+    .replace(/<svg\b[^>]*>/i, (tag) => tag.replace(/\s(width|height)="[^"]*"/gi, ''))
 }
 
 function prefixSvgIds(svg: string, prefix: string) {
