@@ -28,10 +28,6 @@
   </form>
 
   <footer>
-    <div id="download-queue" class="download-queue" hidden>
-      <span id="download-queue-label"></span>
-      <button id="download-next" type="button" class="secondary">Download next HTML</button>
-    </div>
     <button id="cancel" type="button" class="secondary">Cancel</button>
     <button id="export" type="button">Export HTML</button>
   </footer>
@@ -224,21 +220,6 @@
     gap: 8px;
   }
 
-  .download-queue {
-    display: flex;
-    min-width: 0;
-    margin-right: auto;
-    align-items: center;
-    gap: 8px;
-    color: var(--figma-color-text-secondary, #6b7280);
-  }
-
-  .download-queue span {
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-
   .status {
     min-height: 18px;
     color: var(--figma-color-text-secondary, #6b7280);
@@ -257,8 +238,6 @@
     selectedIds: new Set(),
     exporting: false,
     fontFallback: DEFAULT_FONT_FALLBACK,
-    downloadQueue: [],
-    downloadedCount: 0,
   }
 
   const summary = document.getElementById('summary')
@@ -271,9 +250,6 @@
   const refreshButton = document.getElementById('refresh')
   const cancelButton = document.getElementById('cancel')
   const fontFallback = document.getElementById('font-fallback')
-  const downloadQueue = document.getElementById('download-queue')
-  const downloadQueueLabel = document.getElementById('download-queue-label')
-  const downloadNextButton = document.getElementById('download-next')
   const status = document.getElementById('status')
 
   fontFallback.value = state.fontFallback
@@ -284,7 +260,6 @@
 
   refreshButton.onclick = () => post({ type: 'refresh-selection' })
   cancelButton.onclick = () => post({ type: 'cancel' })
-  downloadNextButton.onclick = () => downloadNextQueuedFile()
 
   exportButton.onclick = () => {
     const frameIds = Array.from(state.selectedIds)
@@ -294,7 +269,6 @@
       return
     }
 
-    clearDownloadQueue()
     setExporting(true)
     post({ type: 'export-frames', frameIds, fontFallback: state.fontFallback })
   }
@@ -332,12 +306,8 @@
 
     if (message.type === 'export-result') {
       try {
-        const result = await saveFiles(message.files)
-        if (result === 'queued') {
-          setStatus(`${message.files.length} HTML file(s) ready. Use Download next HTML.`)
-        } else {
-          setStatus(`Exported ${message.files.length} file(s).`)
-        }
+        await saveFiles(message.files)
+        setStatus(`Exported ${message.files.length} file(s).`)
       } catch (error) {
         setStatus(error instanceof Error ? error.message : 'Unable to save files.', true)
       } finally {
@@ -421,46 +391,90 @@
 
     if (files.length === 1) {
       downloadBlob(new Blob([files[0].html], { type: 'text/html;charset=utf-8' }), files[0].name)
-      return 'downloaded'
-    }
-
-    setDownloadQueue(files)
-    return 'queued'
-  }
-
-  function setDownloadQueue(files) {
-    state.downloadQueue = files.slice()
-    state.downloadedCount = 0
-    renderDownloadQueue()
-  }
-
-  function clearDownloadQueue() {
-    state.downloadQueue = []
-    state.downloadedCount = 0
-    renderDownloadQueue()
-  }
-
-  function downloadNextQueuedFile() {
-    const file = state.downloadQueue.shift()
-    if (!file) {
-      clearDownloadQueue()
       return
     }
 
-    state.downloadedCount += 1
-    downloadBlob(new Blob([file.html], { type: 'text/html;charset=utf-8' }), file.name)
-    renderDownloadQueue()
-    setStatus(state.downloadQueue.length === 0 ? 'All queued HTML files downloaded.' : `${state.downloadQueue.length} HTML file(s) remaining.`)
+    downloadBlob(createZip(files), 'figma-html-export.zip')
   }
 
-  function renderDownloadQueue() {
-    const total = state.downloadedCount + state.downloadQueue.length
-    const nextFile = state.downloadQueue[0]
+  function createZip(files) {
+    const encoder = new TextEncoder()
+    const localParts = []
+    const centralParts = []
+    let offset = 0
 
-    downloadQueue.hidden = state.downloadQueue.length === 0
-    downloadNextButton.disabled = state.exporting || state.downloadQueue.length === 0
-    downloadQueueLabel.textContent = nextFile ? `${state.downloadedCount + 1}/${total}: ${nextFile.name}` : ''
+    for (const file of files) {
+      const nameBytes = encoder.encode(file.name)
+      const data = encoder.encode(file.html)
+      const crc = crc32(data)
+
+      const localHeader = new Uint8Array(30 + nameBytes.length)
+      const localView = new DataView(localHeader.buffer)
+      localView.setUint32(0, 0x04034b50, true)
+      localView.setUint16(4, 20, true)
+      localView.setUint16(6, 0x0800, true)
+      localView.setUint16(8, 0, true)
+      localView.setUint16(10, 0, true)
+      localView.setUint16(12, 0, true)
+      localView.setUint32(14, crc, true)
+      localView.setUint32(18, data.length, true)
+      localView.setUint32(22, data.length, true)
+      localView.setUint16(26, nameBytes.length, true)
+      localHeader.set(nameBytes, 30)
+
+      localParts.push(localHeader, data)
+
+      const centralHeader = new Uint8Array(46 + nameBytes.length)
+      const centralView = new DataView(centralHeader.buffer)
+      centralView.setUint32(0, 0x02014b50, true)
+      centralView.setUint16(4, 20, true)
+      centralView.setUint16(6, 20, true)
+      centralView.setUint16(8, 0x0800, true)
+      centralView.setUint16(10, 0, true)
+      centralView.setUint16(12, 0, true)
+      centralView.setUint16(14, 0, true)
+      centralView.setUint32(16, crc, true)
+      centralView.setUint32(20, data.length, true)
+      centralView.setUint32(24, data.length, true)
+      centralView.setUint16(28, nameBytes.length, true)
+      centralView.setUint32(42, offset, true)
+      centralHeader.set(nameBytes, 46)
+
+      centralParts.push(centralHeader)
+      offset += localHeader.length + data.length
+    }
+
+    const centralSize = centralParts.reduce((sum, part) => sum + part.length, 0)
+    const end = new Uint8Array(22)
+    const endView = new DataView(end.buffer)
+    endView.setUint32(0, 0x06054b50, true)
+    endView.setUint16(8, files.length, true)
+    endView.setUint16(10, files.length, true)
+    endView.setUint32(12, centralSize, true)
+    endView.setUint32(16, offset, true)
+
+    return new Blob([...localParts, ...centralParts, end], { type: 'application/zip' })
   }
+
+  function crc32(bytes) {
+    let crc = -1
+
+    for (let index = 0; index < bytes.length; index += 1) {
+      crc = (crc >>> 8) ^ crcTable[(crc ^ bytes[index]) & 0xff]
+    }
+
+    return (crc ^ -1) >>> 0
+  }
+
+  const crcTable = Array.from({ length: 256 }, (_, index) => {
+    let value = index
+
+    for (let bit = 0; bit < 8; bit += 1) {
+      value = value & 1 ? 0xedb88320 ^ (value >>> 1) : value >>> 1
+    }
+
+    return value >>> 0
+  })
 
   function downloadBlob(blob, name) {
     const url = URL.createObjectURL(blob)
@@ -483,7 +497,6 @@
     refreshButton.disabled = value
     selectAll.disabled = value
     fontFallback.disabled = value
-    downloadNextButton.disabled = value || state.downloadQueue.length === 0
   }
 
   function setStatus(message, isError = false) {
