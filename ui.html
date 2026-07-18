@@ -28,6 +28,10 @@
   </form>
 
   <footer>
+    <div id="download-queue" class="download-queue" hidden>
+      <span id="download-queue-label"></span>
+      <button id="download-next" type="button" class="secondary">Download next HTML</button>
+    </div>
     <button id="cancel" type="button" class="secondary">Cancel</button>
     <button id="export" type="button">Export HTML</button>
   </footer>
@@ -215,8 +219,24 @@
 
   footer {
     display: flex;
+    align-items: center;
     justify-content: flex-end;
     gap: 8px;
+  }
+
+  .download-queue {
+    display: flex;
+    min-width: 0;
+    margin-right: auto;
+    align-items: center;
+    gap: 8px;
+    color: var(--figma-color-text-secondary, #6b7280);
+  }
+
+  .download-queue span {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 
   .status {
@@ -237,6 +257,8 @@
     selectedIds: new Set(),
     exporting: false,
     fontFallback: DEFAULT_FONT_FALLBACK,
+    downloadQueue: [],
+    downloadedCount: 0,
   }
 
   const summary = document.getElementById('summary')
@@ -249,6 +271,9 @@
   const refreshButton = document.getElementById('refresh')
   const cancelButton = document.getElementById('cancel')
   const fontFallback = document.getElementById('font-fallback')
+  const downloadQueue = document.getElementById('download-queue')
+  const downloadQueueLabel = document.getElementById('download-queue-label')
+  const downloadNextButton = document.getElementById('download-next')
   const status = document.getElementById('status')
 
   fontFallback.value = state.fontFallback
@@ -259,6 +284,7 @@
 
   refreshButton.onclick = () => post({ type: 'refresh-selection' })
   cancelButton.onclick = () => post({ type: 'cancel' })
+  downloadNextButton.onclick = () => downloadNextQueuedFile()
 
   exportButton.onclick = () => {
     const frameIds = Array.from(state.selectedIds)
@@ -268,6 +294,7 @@
       return
     }
 
+    clearDownloadQueue()
     setExporting(true)
     post({ type: 'export-frames', frameIds, fontFallback: state.fontFallback })
   }
@@ -305,8 +332,12 @@
 
     if (message.type === 'export-result') {
       try {
-        await saveFiles(message.files)
-        setStatus(`Exported ${message.files.length} file(s).`)
+        const result = await saveFiles(message.files)
+        if (result === 'queued') {
+          setStatus(`${message.files.length} HTML file(s) ready. Use Download next HTML.`)
+        } else {
+          setStatus(`Exported ${message.files.length} file(s).`)
+        }
       } catch (error) {
         setStatus(error instanceof Error ? error.message : 'Unable to save files.', true)
       } finally {
@@ -390,17 +421,45 @@
 
     if (files.length === 1) {
       downloadBlob(new Blob([files[0].html], { type: 'text/html;charset=utf-8' }), files[0].name)
+      return 'downloaded'
+    }
+
+    setDownloadQueue(files)
+    return 'queued'
+  }
+
+  function setDownloadQueue(files) {
+    state.downloadQueue = files.slice()
+    state.downloadedCount = 0
+    renderDownloadQueue()
+  }
+
+  function clearDownloadQueue() {
+    state.downloadQueue = []
+    state.downloadedCount = 0
+    renderDownloadQueue()
+  }
+
+  function downloadNextQueuedFile() {
+    const file = state.downloadQueue.shift()
+    if (!file) {
+      clearDownloadQueue()
       return
     }
 
-    await downloadFilesIndividually(files)
+    state.downloadedCount += 1
+    downloadBlob(new Blob([file.html], { type: 'text/html;charset=utf-8' }), file.name)
+    renderDownloadQueue()
+    setStatus(state.downloadQueue.length === 0 ? 'All queued HTML files downloaded.' : `${state.downloadQueue.length} HTML file(s) remaining.`)
   }
 
-  async function downloadFilesIndividually(files) {
-    for (const file of files) {
-      downloadBlob(new Blob([file.html], { type: 'text/html;charset=utf-8' }), file.name)
-      await wait(150)
-    }
+  function renderDownloadQueue() {
+    const total = state.downloadedCount + state.downloadQueue.length
+    const nextFile = state.downloadQueue[0]
+
+    downloadQueue.hidden = state.downloadQueue.length === 0
+    downloadNextButton.disabled = state.exporting || state.downloadQueue.length === 0
+    downloadQueueLabel.textContent = nextFile ? `${state.downloadedCount + 1}/${total}: ${nextFile.name}` : ''
   }
 
   function downloadBlob(blob, name) {
@@ -414,12 +473,6 @@
     URL.revokeObjectURL(url)
   }
 
-  function wait(milliseconds) {
-    return new Promise((resolve) => {
-      setTimeout(resolve, milliseconds)
-    })
-  }
-
   function post(message) {
     parent.postMessage({ pluginMessage: message }, '*')
   }
@@ -430,6 +483,7 @@
     refreshButton.disabled = value
     selectAll.disabled = value
     fontFallback.disabled = value
+    downloadNextButton.disabled = value || state.downloadQueue.length === 0
   }
 
   function setStatus(message, isError = false) {
