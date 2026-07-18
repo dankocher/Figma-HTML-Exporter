@@ -12,6 +12,10 @@ type Matrix = [[number, number, number], [number, number, number]]
 
 const SVG_EXPORT_SETTINGS: ExportSettingsSVGString = {
   format: 'SVG_STRING',
+  svgIdAttribute: true,
+  svgOutlineText: true,
+  svgSimplifyStroke: false,
+  colorProfile: 'DOCUMENT',
 }
 
 figma.showUI(__html__, { width: 420, height: 480, themeColors: true })
@@ -198,8 +202,8 @@ async function renderSceneNode(node: SceneNode, parentMatrix: Matrix): Promise<s
 
 async function renderTextNode(node: TextNode, parentMatrix: Matrix) {
   const style = textContainerStyle(node, parentMatrix)
-  const contentStyle = textBlockStyle(node)
-  const text = await renderTextContent(node)
+  const contentStyle = await textBlockStyle(node)
+  const text = await renderTextContent(node, contentStyle)
 
   return `<div class="figma-node figma-text" data-name="${escapeAttribute(node.name)}" style="${style}"><div style="${contentStyle}">${text}</div></div>`
 }
@@ -462,8 +466,24 @@ function isShadowEffect(effect: Effect): effect is DropShadowEffect | InnerShado
   return effect.visible !== false && (effect.type === 'DROP_SHADOW' || effect.type === 'INNER_SHADOW')
 }
 
-function textBlockStyle(node: TextNode) {
+async function textBlockStyle(node: TextNode) {
+  const css = await node.getCSSAsync().catch(() => ({}))
+
   return [
+    cssToInlineStyle(css, [
+      'font-family',
+      'font-size',
+      'font-style',
+      'font-weight',
+      'font-variant',
+      'font-feature-settings',
+      'line-height',
+      'letter-spacing',
+      'text-align',
+      'text-decoration',
+      'text-transform',
+      'color',
+    ]),
     `text-align: ${node.textAlignHorizontal.toLowerCase()};`,
     `margin: 0;`,
     `padding: 0;`,
@@ -471,11 +491,12 @@ function textBlockStyle(node: TextNode) {
   ].join(' ')
 }
 
-async function renderTextContent(node: TextNode) {
+async function renderTextContent(node: TextNode, contentStyle: string) {
   const boundaries = node.getStyledTextSegments([
     'fontName',
     'fontSize',
     'fontWeight',
+    'fontStyle',
     'fills',
     'letterSpacing',
     'lineHeight',
@@ -485,6 +506,11 @@ async function renderTextContent(node: TextNode) {
 
   if (boundaries.length === 0) {
     return escapeHtml(applyTextCase(node.characters, node.textCase))
+  }
+
+  if (boundaries.length === 1) {
+    const segment = boundaries[0]
+    return `<span data-figma-css="${escapeAttribute(contentStyle)}">${escapeHtml(applyTextCase(segment.characters, segment.textCase))}</span>`
   }
 
   const renderedSegments = await Promise.all(
@@ -582,6 +608,15 @@ function normalizeSvg(svg: string, nodeId: string) {
   return prefixSvgIds(svg, prefix)
     .replace(/<script[\s\S]*?<\/script>/gi, '')
     .replace(/<svg\b[^>]*>/i, (tag) => tag.replace(/\s(width|height)="[^"]*"/gi, ''))
+}
+
+function cssToInlineStyle(css: { [key: string]: string }, properties: string[]) {
+  return properties
+    .flatMap((property) => {
+      const value = css[property]
+      return value ? [`${property}: ${value};`] : []
+    })
+    .join(' ')
 }
 
 function prefixSvgIds(svg: string, prefix: string) {
