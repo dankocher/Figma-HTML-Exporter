@@ -6,6 +6,7 @@ type ExportFile = {
 type UIMessage =
   | { type: 'refresh-selection' }
   | { type: 'export-frames'; frameIds: string[]; fontFallback?: string }
+  | { type: 'update-font-fallback'; fontFallback?: string }
   | { type: 'cancel' }
 
 type Matrix = [[number, number, number], [number, number, number]]
@@ -20,6 +21,7 @@ const SVG_EXPORT_SETTINGS: ExportSettingsSVGString = {
 
 const DEFAULT_FONT_FALLBACK =
   '-apple-system, BlinkMacSystemFont, Segoe UI, Roboto, Oxygen, Ubuntu, Cantarell, Fira Sans, Droid Sans, Helvetica Neue, sans-serif'
+const FONT_FALLBACK_STORAGE_KEY = 'html-exporter-font-fallback'
 
 figma.showUI(__html__, { width: 420, height: 480, themeColors: true })
 
@@ -40,10 +42,28 @@ figma.ui.onmessage = async (msg: UIMessage) => {
 
   if (msg.type === 'export-frames') {
     await exportFrames(msg.frameIds, msg.fontFallback)
+    await saveFontFallback(msg.fontFallback)
+    return
+  }
+
+  if (msg.type === 'update-font-fallback') {
+    await saveFontFallback(msg.fontFallback)
   }
 }
 
-postSelection()
+initializePlugin()
+
+async function initializePlugin() {
+  postSelection()
+  await postSettings()
+}
+
+async function postSettings() {
+  figma.ui.postMessage({
+    type: 'settings-update',
+    fontFallback: await loadFontFallback(),
+  })
+}
 
 function postSelection() {
   const frames = figma.currentPage.selection.filter(isFrameNode).map((frame) => ({
@@ -90,6 +110,17 @@ async function exportFrames(frameIds: string[], fontFallbackInput?: string) {
       message: errorMessage(error),
     })
   }
+}
+
+async function loadFontFallback() {
+  const value = await figma.clientStorage.getAsync(FONT_FALLBACK_STORAGE_KEY).catch(() => undefined)
+  return normalizeFontFallback(typeof value === 'string' ? value : undefined)
+}
+
+async function saveFontFallback(fontFallbackInput?: string) {
+  await figma.clientStorage
+    .setAsync(FONT_FALLBACK_STORAGE_KEY, normalizeFontFallback(fontFallbackInput))
+    .catch(() => undefined)
 }
 
 async function resolveFrames(frameIds: string[]) {
