@@ -2,6 +2,9 @@
 *.log
 *.log.*
 node_modules
+.yarn/
+package-lock.json
+yarn.lock
 
 out/
 dist/
