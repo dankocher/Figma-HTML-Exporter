@@ -79,7 +79,7 @@ async function exportFrames(frameIds: string[]) {
   } catch (error) {
     figma.ui.postMessage({
       type: 'export-error',
-      message: error instanceof Error ? error.message : 'Unexpected export error.',
+      message: errorMessage(error),
     })
   }
 }
@@ -105,7 +105,7 @@ async function renderFrameDocument(frame: FrameNode) {
   const children = await Promise.all(
     frame.children
       .filter((child) => child.visible)
-      .map((child) => renderSceneNode(child, frame.absoluteTransform)),
+      .map((child) => safeRenderSceneNode(child, frame.absoluteTransform)),
   )
   const frameBackground = await paintStyles(frame.fills)
 
@@ -176,7 +176,7 @@ async function renderSceneNode(node: SceneNode, parentMatrix: Matrix): Promise<s
     const children = await Promise.all(
       node.children
         .filter((child) => child.visible)
-        .map((child) => renderSceneNode(child, node.absoluteTransform)),
+        .map((child) => safeRenderSceneNode(child, node.absoluteTransform)),
     )
 
     return `<div class="figma-node" data-name="${escapeAttribute(node.name)}" style="${await visualStyle(node, parentMatrix)}">${children.join('\n')}</div>`
@@ -199,8 +199,18 @@ async function renderTextNode(node: TextNode, parentMatrix: Matrix) {
   return `<div class="figma-node figma-text" data-name="${escapeAttribute(node.name)}" style="${style}">${escapeHtml(applyTextCase(node.characters, node.textCase))}</div>`
 }
 
+async function safeRenderSceneNode(node: SceneNode, parentMatrix: Matrix) {
+  try {
+    return await renderSceneNode(node, parentMatrix)
+  } catch (error) {
+    return `<!-- Skipped ${escapeHtml(node.type)} "${escapeHtml(node.name)}": ${escapeHtml(errorMessage(error))} -->`
+  }
+}
+
 async function renderSvgNode(node: SceneNode, parentMatrix: Matrix) {
-  const svgBytes = await node.exportAsync(SVG_EXPORT_SETTINGS)
+  const svgBytes = await node.exportAsync(SVG_EXPORT_SETTINGS).catch((error: unknown) => {
+    throw new Error(`Could not export "${node.name}" as SVG: ${errorMessage(error)}`)
+  })
 
   return `<img class="figma-node figma-vector" data-name="${escapeAttribute(node.name)}" src="${bytesToDataUrl(svgBytes, 'image/svg+xml')}" alt="${escapeAttribute(node.name)}" style="${baseStyle(node, parentMatrix)} ${effectsStyle(node)}">`
 }
@@ -278,7 +288,11 @@ async function paintToCss(paint: Paint, property: 'background' | 'color') {
       return ''
     }
 
-    const bytes = await image.getBytesAsync()
+    const bytes = await image.getBytesAsync().catch(() => null)
+    if (!bytes) {
+      return ''
+    }
+
     return `url("${bytesToDataUrl(bytes, imageMimeType(bytes))}")`
   }
 
@@ -612,6 +626,22 @@ function blendModeToCss(blendMode: BlendMode) {
   }
 
   return modes[blendMode] ?? 'normal'
+}
+
+function errorMessage(error: unknown) {
+  if (error instanceof Error) {
+    return error.message
+  }
+
+  if (typeof error === 'string') {
+    return error
+  }
+
+  try {
+    return JSON.stringify(error)
+  } catch (_jsonError) {
+    return String(error)
+  }
 }
 
 function uniqueFileName(name: string, usedNames: Set<string>) {
